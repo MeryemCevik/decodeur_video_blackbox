@@ -1,0 +1,13 @@
+/* Style général */
+body {
+    font-family: Arial, sans-serif;
+    text-align: center;
+    padding: 20px;
+  }
+  
+  /* Style pour la zone vidéo reconstituée */
+  #videoContainer canvas {
+    margin-top: 20px;
+    border: 1px solid #333; /* Contour pour mieux visualiser le canvas */
+  }
+  

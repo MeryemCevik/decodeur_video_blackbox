@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Contrôle Intégrité Vidéo</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <h1>Contrôle Intégrité Vidéo</h1>
+
+  <!-- Input pour que le conducteur sélectionne sa vidéo -->
+  <input type="file" id="uploadedVideo" accept="video/*">
+
+  <!-- Bouton pour lancer la vérification -->
+  <button id="verifyBtn">Vérifier la vidéo</button>
+
+  <!-- Zone d'affichage du résultat de la vérification -->
+  <div id="result"></div>
+
+  <!-- Zone pour reconstituer la vidéo saccadée -->
+  <div id="videoContainer"></div>
+
+  <!-- Script principal pour la vérification -->
+  <script type="module" src="verify.js"></script>
+</body>
+</html>
