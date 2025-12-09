@@ -1,32 +1,32 @@
 import { supabase } from "./supabaseClient.js";
 
-// Récupération des éléments HTML
+// ----------------------------
+// Éléments HTML
+// ----------------------------
 const videoInput = document.getElementById("uploadedVideo");
 const verifyBtn = document.getElementById("verifyBtn");
 const resultDiv = document.getElementById("result");
 const videoContainer = document.getElementById("videoContainer");
 
-// Intervalle entre chaque frame en ms pour créer la redondance
+// Intervalle entre chaque frame pour créer la redondance (ms)
 const FRAME_INTERVAL = 300;
 
 // Canvas temporaire pour extraire les frames
 const canvas = document.createElement("canvas");
 const ctx = canvas.getContext("2d");
 
-/* ----------------------------
-   1️⃣ Récupérer tous les hash stockés par l'assureur
----------------------------- */
+// ----------------------------
+// 1️⃣ Récupérer tous les hash stockés par l'assureur
+// ----------------------------
 async function getStoredHashes() {
   const { data, error } = await supabase.from("frame_hashes").select("hash");
   if (error) throw new Error(error.message);
-
-  // On renvoie un tableau de hash uniquement
-  return data.map(f => f.hash);
+  return data.map(f => f.hash); // tableau de hash
 }
 
-/* ----------------------------
-   2️⃣ Extraire les frames d'une vidéo
----------------------------- */
+// ----------------------------
+// 2️⃣ Extraire les frames d'une vidéo
+// ----------------------------
 function extractFrames(videoEl) {
   return new Promise(resolve => {
     const frames = [];
@@ -41,9 +41,7 @@ function extractFrames(videoEl) {
           resolve(frames); // renvoie le tableau de frames
         } else {
           ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
-
-          // Convertit le canvas en DataURL
-          frames.push(canvas.toDataURL("image/jpeg", 0.7));
+          frames.push(canvas.toDataURL("image/jpeg", 0.7)); // capture frame
         }
       }, FRAME_INTERVAL);
 
@@ -52,10 +50,9 @@ function extractFrames(videoEl) {
   });
 }
 
-/* ----------------------------
-   3️⃣ Convertir DataURL en Blob
-   ⚠️ C'est le changement principal pour être compatible avec l'encodeur
----------------------------- */
+// ----------------------------
+// 3️⃣ Convertir DataURL en Blob
+// ----------------------------
 function dataURLtoBlob(dataURL) {
   const [header, base64] = dataURL.split(',');
   const binary = atob(base64);
@@ -64,46 +61,46 @@ function dataURLtoBlob(dataURL) {
   return new Blob([array], { type: "image/jpeg" });
 }
 
-/* ----------------------------
-   4️⃣ Calculer le hash SHA-256 d'une frame (Blob)
-   ⚠️ Utilisation du même format que l'encodeur
----------------------------- */
+// ----------------------------
+// 4️⃣ Calculer le hash SHA-256 d'une frame (Blob)
+// ----------------------------
 async function hashFrame(frameDataURL) {
-  const blob = dataURLtoBlob(frameDataURL); // Convertit DataURL en Blob
+  const blob = dataURLtoBlob(frameDataURL); // conversion Blob
   const arrayBuffer = await blob.arrayBuffer();
   const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
 
+  // transforme le hash en chaîne hexadécimale
   return [...new Uint8Array(hashBuffer)]
     .map(b => b.toString(16).padStart(2, "0"))
     .join('');
 }
 
-/* ----------------------------
-   5️⃣ Vérifier les frames d'une vidéo
----------------------------- */
+// ----------------------------
+// 5️⃣ Vérifier les frames d'une vidéo
+// ----------------------------
 async function verifyVideo(videoFile) {
   const videoURL = URL.createObjectURL(videoFile);
   const videoEl = document.createElement("video");
   videoEl.src = videoURL;
   videoEl.muted = true;
 
-  const frames = await extractFrames(videoEl);
-  const storedHashes = await getStoredHashes();
-  const storedHashSet = new Set(storedHashes);
+  const frames = await extractFrames(videoEl);            // extraire frames
+  const storedHashes = await getStoredHashes();          // hash Supabase
+  const storedHashSet = new Set(storedHashes);           // pour comparaison rapide
 
   const results = [];
   for (const frameDataURL of frames) {
     const hash = await hashFrame(frameDataURL);
-    const valid = storedHashSet.has(hash); // true si la frame est valide
+    const valid = storedHashSet.has(hash); // true si frame valide
     results.push({ hash, valid });
   }
 
   return { results, frames };
 }
 
-/* ----------------------------
-   6️⃣ Reconstituer la vidéo saccadée pour visualisation
----------------------------- */
+// ----------------------------
+// 6️⃣ Reconstituer la vidéo saccadée
+// ----------------------------
 async function playFrames(frames) {
   videoContainer.innerHTML = "";
 
@@ -126,9 +123,9 @@ async function playFrames(frames) {
   }
 }
 
-/* ----------------------------
-   7️⃣ Gestion du clic sur le bouton
----------------------------- */
+// ----------------------------
+// 7️⃣ Gestion du clic sur le bouton
+// ----------------------------
 verifyBtn.onclick = async () => {
   if (!videoInput.files[0]) {
     alert("Sélectionne une vidéo !");
@@ -145,7 +142,7 @@ verifyBtn.onclick = async () => {
     const total = results.length;
     resultDiv.textContent = `Frames valides : ${validCount} / ${total}`;
 
-    await playFrames(frames);
+    await playFrames(frames); // visualisation saccadée
 
   } catch (e) {
     resultDiv.textContent = "Erreur : " + e.message;
