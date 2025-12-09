@@ -31,67 +31,66 @@ function extractFrames(videoEl) {
   return new Promise(resolve => {
     const frames = [];
 
-    // Quand la vidéo est prête, on commence la capture
     videoEl.addEventListener("loadedmetadata", () => {
       canvas.width = videoEl.videoWidth;
       canvas.height = videoEl.videoHeight;
 
-      // Capture toutes les FRAME_INTERVAL ms
       const capture = setInterval(() => {
         if (videoEl.ended) {
           clearInterval(capture);
           resolve(frames); // renvoie le tableau de frames
         } else {
-          // Dessine la frame actuelle sur le canvas
           ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
 
-          // Convertit le canvas en image (dataURL)
+          // Convertit le canvas en DataURL
           frames.push(canvas.toDataURL("image/jpeg", 0.7));
         }
       }, FRAME_INTERVAL);
 
-      // Démarre la lecture
       videoEl.play();
     });
   });
 }
 
 /* ----------------------------
-   3️⃣ Calculer le hash SHA-256 d'une frame
+   3️⃣ Convertir DataURL en Blob
+   ⚠️ C'est le changement principal pour être compatible avec l'encodeur
 ---------------------------- */
-async function hashFrame(frameDataURL) {
-  const [header, base64] = frameDataURL.split(',');
+function dataURLtoBlob(dataURL) {
+  const [header, base64] = dataURL.split(',');
   const binary = atob(base64);
   const array = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) array[i] = binary.charCodeAt(i);
+  return new Blob([array], { type: "image/jpeg" });
+}
 
-  // Génère le hash SHA-256
-  const hashBuffer = await crypto.subtle.digest("SHA-256", array);
+/* ----------------------------
+   4️⃣ Calculer le hash SHA-256 d'une frame (Blob)
+   ⚠️ Utilisation du même format que l'encodeur
+---------------------------- */
+async function hashFrame(frameDataURL) {
+  const blob = dataURLtoBlob(frameDataURL); // Convertit DataURL en Blob
+  const arrayBuffer = await blob.arrayBuffer();
+  const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
 
-  // Convertit le hash en chaîne hexadécimale
   return [...new Uint8Array(hashBuffer)]
     .map(b => b.toString(16).padStart(2, "0"))
     .join('');
 }
 
 /* ----------------------------
-   4️⃣ Vérifier les frames d'une vidéo
+   5️⃣ Vérifier les frames d'une vidéo
 ---------------------------- */
 async function verifyVideo(videoFile) {
-  // Crée un URL local pour la vidéo
   const videoURL = URL.createObjectURL(videoFile);
   const videoEl = document.createElement("video");
   videoEl.src = videoURL;
   videoEl.muted = true;
 
-  // 1️⃣ Extraire les frames
   const frames = await extractFrames(videoEl);
-
-  // 2️⃣ Récupérer les hash stockés par l'assureur
   const storedHashes = await getStoredHashes();
   const storedHashSet = new Set(storedHashes);
 
-  // 3️⃣ Vérifier chaque frame
   const results = [];
   for (const frameDataURL of frames) {
     const hash = await hashFrame(frameDataURL);
@@ -99,14 +98,14 @@ async function verifyVideo(videoFile) {
     results.push({ hash, valid });
   }
 
-  return { results, frames }; // on renvoie aussi les frames pour les afficher
+  return { results, frames };
 }
 
 /* ----------------------------
-   5️⃣ Reconstituer la vidéo saccadée pour visualisation
+   6️⃣ Reconstituer la vidéo saccadée pour visualisation
 ---------------------------- */
 async function playFrames(frames) {
-  videoContainer.innerHTML = ""; // vide l'ancien contenu
+  videoContainer.innerHTML = "";
 
   const videoCanvas = document.createElement("canvas");
   const ctx = videoCanvas.getContext("2d");
@@ -115,7 +114,6 @@ async function playFrames(frames) {
   videoCanvas.width = 640;
   videoCanvas.height = 360;
 
-  // Affiche les frames une par une
   for (const frame of frames) {
     const img = new Image();
     img.src = frame;
@@ -129,7 +127,7 @@ async function playFrames(frames) {
 }
 
 /* ----------------------------
-   6️⃣ Gestion du clic sur le bouton
+   7️⃣ Gestion du clic sur le bouton
 ---------------------------- */
 verifyBtn.onclick = async () => {
   if (!videoInput.files[0]) {
@@ -141,16 +139,12 @@ verifyBtn.onclick = async () => {
 
   try {
     const videoFile = videoInput.files[0];
-
-    // Vérification des frames et récupération des frames
     const { results, frames } = await verifyVideo(videoFile);
 
-    // Calcul du nombre de frames valides
     const validCount = results.filter(r => r.valid).length;
     const total = results.length;
     resultDiv.textContent = `Frames valides : ${validCount} / ${total}`;
 
-    // Reconstitution visuelle de la vidéo saccadée
     await playFrames(frames);
 
   } catch (e) {
