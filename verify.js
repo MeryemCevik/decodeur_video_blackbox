@@ -5,15 +5,13 @@ const verifyBtn = document.getElementById("verifyBtn");
 const resultDiv = document.getElementById("result");
 const videoContainer = document.getElementById("videoContainer");
 
-const FRAME_INTERVAL = 200; // 5 fps pour la reconstruction
-const HASH_THRESHOLD = 5; // Seuil de similarité pour SHA-256 (en %)
-
-let userVideoFrames = [];
+const FRAME_INTERVAL = 300; // 3.3 fps pour la reconstruction
+const SIMILARITY_THRESHOLD = 95; // % de similarité requis
 
 // -------------------
-// 1️⃣ Calcul de hash SHA-256
+// 1️⃣ Calcul SHA-256 depuis Blob
 // -------------------
-async function calculateHashFromBlob(blob) {
+async function calculateSHA256FromBlob(blob) {
   try {
     const buffer = await blob.arrayBuffer();
     const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
@@ -26,42 +24,50 @@ async function calculateHashFromBlob(blob) {
 }
 
 // -------------------
-// 2️⃣ Similarité de hash (pourcentage)
+// 2️⃣ Similarité entre hashs (pourcentage)
 // -------------------
 function hashSimilarity(hash1, hash2) {
   if (!hash1 || !hash2 || hash1.length !== hash2.length) return 0;
   
   let matches = 0;
-  for (let i = 0; i < hash1.length; i++) {
+  const minLength = Math.min(hash1.length, hash2.length);
+  
+  for (let i = 0; i < minLength; i++) {
     if (hash1[i] === hash2[i]) matches++;
   }
   
-  return (matches / hash1.length) * 100;
+  return (matches / minLength) * 100;
 }
 
 // -------------------
 // 3️⃣ Extraction des frames de la vidéo utilisateur
 // -------------------
-async function extractFramesFromVideo(videoFile) {
+async function extractUserVideoFrames(videoFile) {
   return new Promise((resolve, reject) => {
     const video = document.createElement('video');
-    video.src = URL.createObjectURL(videoFile);
+    const url = URL.createObjectURL(videoFile);
+    video.src = url;
     video.muted = true;
+    video.playsInline = true;
     
     video.onloadeddata = async () => {
       const frames = [];
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
       
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
       
-      // Extraire une frame toutes les 100ms
+      // Extraire frames à intervalles réguliers
+      const extractInterval = 200; // ms (5 fps)
       const duration = video.duration * 1000; // en ms
-      const interval = 100; // ms
+      const totalFrames = Math.floor(duration / extractInterval);
       
-      for (let time = 0; time < duration; time += interval) {
-        video.currentTime = time / 1000;
+      console.log(`Extraction de ${totalFrames} frames...`);
+      
+      for (let i = 0; i < totalFrames; i++) {
+        const time = (i * extractInterval) / 1000;
+        video.currentTime = time;
         
         await new Promise(resolve => {
           video.onseeked = () => {
@@ -69,11 +75,12 @@ async function extractFramesFromVideo(videoFile) {
             
             canvas.toBlob(async (blob) => {
               if (blob) {
-                const hash = await calculateHashFromBlob(blob);
+                const hash = await calculateSHA256FromBlob(blob);
                 frames.push({
-                  timestamp: time,
+                  timestamp: time * 1000,
                   blob,
                   hash,
+                  index: i,
                   dataURL: canvas.toDataURL('image/jpeg', 0.5)
                 });
               }
@@ -83,340 +90,286 @@ async function extractFramesFromVideo(videoFile) {
         });
       }
       
-      URL.revokeObjectURL(video.src);
+      URL.revokeObjectURL(url);
       resolve(frames);
     };
     
-    video.onerror = reject;
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Erreur chargement vidéo"));
+    };
   });
 }
 
 // -------------------
-// 4️⃣ Récupération des hashes stockés par session
+// 4️⃣ Récupération des hashs depuis la table frame_hashes
 // -------------------
-async function getStoredHashes(sessionId = null) {
+async function getStoredHashes() {
   try {
-    let query = supabase.from("frame_hashes").select("*");
-    
-    if (sessionId) {
-      query = query.eq("session_id", sessionId);
-    }
-    
-    const { data, error } = await query.order("timestamp", { ascending: true });
+    // Récupérer les 1000 derniers hashs (ajustez selon vos besoins)
+    const { data, error } = await supabase
+      .from("frame_hashes")
+      .select("hash, timestamp, frame_path")
+      .order("timestamp", { ascending: false })
+      .limit(1000);
     
     if (error) throw error;
     
-    // Grouper par hash pour éviter les doublons
-    const uniqueHashes = {};
-    data.forEach(item => {
-      if (!uniqueHashes[item.hash]) {
-        uniqueHashes[item.hash] = {
-          hash: item.hash,
-          timestamp: item.timestamp,
-          session_id: item.session_id,
-          frame_path: item.frame_path
-        };
-      }
-    });
+    console.log(`${data.length} hashs récupérés depuis la base`);
+    return data;
     
-    return Object.values(uniqueHashes);
   } catch (error) {
-    console.error("Erreur récupération hashes:", error);
+    console.error("Erreur récupération hashs:", error);
     return [];
   }
 }
 
 // -------------------
-// 5️⃣ Récupération des frames stockées
+// 5️⃣ Vérification d'intégrité
 // -------------------
-async function getStoredFrames(sessionId = null) {
-  try {
-    // Lister tous les dossiers dans videos/
-    const { data: folders, error: listError } = await supabase.storage
-      .from("videos")
-      .list("frames");
-    
-    if (listError) throw listError;
-    
-    let framePaths = [];
-    
-    // Si sessionId spécifiée, chercher dans ce dossier
-    if (sessionId) {
-      const sessionFolder = folders.find(f => f.name === sessionId);
-      if (sessionFolder) {
-        const { data: sessionFrames } = await supabase.storage
-          .from("videos")
-          .list(`frames/${sessionId}`);
-        
-        if (sessionFrames) {
-          framePaths = sessionFrames
-            .filter(f => f.name.endsWith('.jpg'))
-            .map(f => `frames/${sessionId}/${f.name}`);
-        }
-      }
-    } else {
-      // Sinon, récupérer toutes les frames de toutes les sessions
-      for (const folder of folders) {
-        if (folder.name !== '.emptyFolderPlaceholder') {
-          const { data: sessionFrames } = await supabase.storage
-            .from("videos")
-            .list(`frames/${folder.name}`);
-          
-          if (sessionFrames) {
-            const paths = sessionFrames
-              .filter(f => f.name.endsWith('.jpg'))
-              .map(f => `frames/${folder.name}/${f.name}`);
-            framePaths.push(...paths);
-          }
-        }
-      }
-    }
-    
-    return framePaths.slice(0, 100); // Limiter à 100 frames max pour les performances
-  } catch (error) {
-    console.error("Erreur récupération frames:", error);
-    return [];
+async function verifyVideoIntegrity(userFrames) {
+  resultDiv.innerHTML = "<div class='loading'>🔄 Analyse en cours...</div>";
+  
+  // Récupérer les hashs stockés
+  const storedHashes = await getStoredHashes();
+  
+  if (storedHashes.length === 0) {
+    return {
+      matched: 0,
+      total: userFrames.length,
+      percentage: 0,
+      message: "Aucun hash trouvé dans la base de données"
+    };
   }
-}
-
-// -------------------
-// 6️⃣ Téléchargement d'une frame
-// -------------------
-async function downloadFrame(path) {
-  try {
-    const { data, error } = await supabase.storage
-      .from("videos")
-      .download(path);
-    
-    if (error) throw error;
-    
-    const url = URL.createObjectURL(data);
-    const hash = await calculateHashFromBlob(data);
-    
-    return { url, hash, path };
-  } catch (error) {
-    console.error("Erreur téléchargement frame:", error);
-    return null;
-  }
-}
-
-// -------------------
-// 7️⃣ Vérification d'intégrité
-// -------------------
-async function verifyIntegrity(userFrames) {
-  resultDiv.innerHTML = "<p>Analyse en cours...</p>";
   
-  // Détecter la session probable (basée sur le timestamp le plus proche)
-  const userStartTime = userFrames[0]?.timestamp || 0;
+  let matchedFrames = 0;
+  const matches = [];
   
-  // Récupérer toutes les sessions disponibles
-  const { data: sessions } = await supabase
-    .from("frame_hashes")
-    .select("session_id")
-    .order("timestamp", { ascending: true });
-  
-  let bestSession = null;
-  let bestMatchCount = 0;
-  let verificationResults = [];
-  
-  // Tester chaque session
-  const uniqueSessions = [...new Set(sessions?.map(s => s.session_id) || [])];
-  
-  for (const sessionId of uniqueSessions) {
-    const storedHashes = await getStoredHashes(sessionId);
+  // Comparer chaque frame utilisateur avec les hashs stockés
+  for (const userFrame of userFrames) {
+    let bestMatch = null;
+    let bestSimilarity = 0;
     
-    if (storedHashes.length === 0) continue;
-    
-    let matchCount = 0;
-    const sessionResults = [];
-    
-    // Comparer chaque frame utilisateur avec les hashs stockés
-    for (const userFrame of userFrames) {
-      let bestSimilarity = 0;
-      let bestStoredHash = null;
+    for (const stored of storedHashes) {
+      const similarity = hashSimilarity(userFrame.hash, stored.hash);
       
-      for (const storedHash of storedHashes) {
-        const similarity = hashSimilarity(userFrame.hash, storedHash.hash);
-        
-        if (similarity > bestSimilarity && similarity > (100 - HASH_THRESHOLD)) {
-          bestSimilarity = similarity;
-          bestStoredHash = storedHash;
-        }
-      }
-      
-      if (bestStoredHash) {
-        matchCount++;
-        sessionResults.push({
-          userFrame,
-          storedHash: bestStoredHash,
-          similarity: bestSimilarity,
-          matched: true
-        });
-      } else {
-        sessionResults.push({
-          userFrame,
-          matched: false
-        });
+      if (similarity > bestSimilarity && similarity >= SIMILARITY_THRESHOLD) {
+        bestSimilarity = similarity;
+        bestMatch = stored;
       }
     }
     
-    // Mettre à jour la meilleure session
-    if (matchCount > bestMatchCount) {
-      bestMatchCount = matchCount;
-      bestSession = sessionId;
-      verificationResults = sessionResults;
+    if (bestMatch) {
+      matchedFrames++;
+      matches.push({
+        userFrame,
+        stored: bestMatch,
+        similarity: bestSimilarity
+      });
     }
   }
+  
+  const integrityPercentage = (matchedFrames / userFrames.length) * 100;
   
   return {
-    bestSession,
-    bestMatchCount,
-    totalFrames: userFrames.length,
-    integrityPercentage: (bestMatchCount / userFrames.length) * 100,
-    results: verificationResults
+    matched: matchedFrames,
+    total: userFrames.length,
+    percentage: integrityPercentage,
+    matches: matches,
+    message: integrityPercentage > 80 ? 
+      "✅ Vidéo intègre - Correspondance élevée" :
+      integrityPercentage > 50 ?
+      "⚠️ Vidéo partiellement corrompue - Correspondance moyenne" :
+      "❌ Vidéo altérée - Faible correspondance"
   };
 }
 
 // -------------------
-// 8️⃣ Reconstruction vidéo saccadée
+// 6️⃣ Reconstruction de la vidéo à partir des frames stockées
 // -------------------
-async function reconstructVideo(framesData, sessionId) {
+async function reconstructFromStoredFrames() {
   videoContainer.innerHTML = "";
   
-  // Récupérer les frames stockées de la session
-  const framePaths = await getStoredFrames(sessionId);
-  
-  if (framePaths.length === 0) {
-    videoContainer.innerHTML = "<p>Aucune frame disponible pour la reconstruction</p>";
-    return;
-  }
-  
-  const canvas = document.createElement("canvas");
-  canvas.width = 640;
-  canvas.height = 480;
-  canvas.style.border = "2px solid #333";
-  videoContainer.appendChild(canvas);
-  
-  const ctx = canvas.getContext("2d");
-  const status = document.createElement("p");
-  videoContainer.appendChild(status);
-  
-  // Trier les frames par timestamp (extrait du nom de fichier)
-  const sortedFrames = await Promise.all(
-    framePaths.map(async path => {
-      const frameData = await downloadFrame(path);
-      if (!frameData) return null;
-      
-      // Extraire timestamp du nom de fichier
-      const timestampMatch = path.match(/frame_(\d+)_/);
-      const timestamp = timestampMatch ? parseInt(timestampMatch[1]) : 0;
-      
-      return { ...frameData, timestamp };
-    })
-  );
-  
-  // Filtrer les frames nulles et trier par timestamp
-  const validFrames = sortedFrames.filter(f => f !== null)
-    .sort((a, b) => a.timestamp - b.timestamp);
-  
-  // Afficher les frames avec intervalle régulier
-  status.textContent = `Reconstruction: ${validFrames.length} frames`;
-  
-  for (let i = 0; i < validFrames.length; i++) {
-    const frame = validFrames[i];
-    const img = new Image();
+  try {
+    // Récupérer les frames les plus récentes
+    const { data: hashes, error } = await supabase
+      .from("frame_hashes")
+      .select("frame_path")
+      .order("timestamp", { ascending: true })
+      .limit(50); // Limiter à 50 frames pour la démo
     
-    await new Promise(resolve => {
-      img.onload = () => {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        
-        // Ajouter overlay d'information
-        ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
-        ctx.fillRect(10, 10, 200, 60);
-        ctx.fillStyle = "white";
-        ctx.font = "12px Arial";
-        ctx.fillText(`Frame: ${i + 1}/${validFrames.length}`, 20, 30);
-        ctx.fillText(`Timestamp: ${new Date(frame.timestamp).toLocaleTimeString()}`, 20, 50);
-        
-        setTimeout(resolve, FRAME_INTERVAL);
-      };
-      
-      img.src = frame.url;
-    });
+    if (error) throw error;
     
-    // Libérer la mémoire
-    URL.revokeObjectURL(frame.url);
+    if (hashes.length === 0) {
+      videoContainer.innerHTML = "<p>Aucune frame disponible</p>";
+      return;
+    }
+    
+    const canvas = document.createElement("canvas");
+    canvas.width = 640;
+    canvas.height = 480;
+    canvas.style.border = "2px solid #333";
+    videoContainer.appendChild(canvas);
+    
+    const ctx = canvas.getContext("2d");
+    const info = document.createElement("p");
+    info.textContent = `Reconstruction de ${hashes.length} frames...`;
+    videoContainer.appendChild(info);
+    
+    // Télécharger et afficher chaque frame
+    for (let i = 0; i < hashes.length; i++) {
+      const framePath = hashes[i].frame_path;
+      
+      if (!framePath) continue;
+      
+      try {
+        // Télécharger la frame depuis storage
+        const { data, error } = await supabase.storage
+          .from("videos")
+          .download(framePath);
+        
+        if (error) continue;
+        
+        const url = URL.createObjectURL(data);
+        const img = new Image();
+        
+        await new Promise(resolve => {
+          img.onload = () => {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            
+            // Ajouter info overlay
+            ctx.fillStyle = "rgba(0,0,0,0.6)";
+            ctx.fillRect(10, 10, 180, 40);
+            ctx.fillStyle = "white";
+            ctx.font = "14px Arial";
+            ctx.fillText(`Frame: ${i + 1}/${hashes.length}`, 20, 30);
+            
+            setTimeout(() => {
+              URL.revokeObjectURL(url);
+              resolve();
+            }, FRAME_INTERVAL);
+          };
+          
+          img.src = url;
+        });
+        
+        info.textContent = `Frame ${i + 1}/${hashes.length}`;
+        
+      } catch (err) {
+        console.error("Erreur frame:", err);
+        continue;
+      }
+    }
+    
+    info.textContent = "✅ Reconstruction terminée";
+    
+  } catch (error) {
+    console.error("Erreur reconstruction:", error);
+    videoContainer.innerHTML = "<p>Erreur lors de la reconstruction</p>";
   }
-  
-  status.textContent += " - Reconstruction terminée";
 }
 
 // -------------------
-// 9️⃣ Gestion des événements
+// 7️⃣ Gestion événements
 // -------------------
 videoInput.onchange = async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   
-  resultDiv.innerHTML = "<p>Extraction des frames en cours...</p>";
+  if (!file.type.startsWith('video/')) {
+    alert("Veuillez sélectionner un fichier vidéo");
+    return;
+  }
+  
+  resultDiv.innerHTML = "<div class='loading'>📹 Extraction des frames...</div>";
+  verifyBtn.disabled = true;
   
   try {
-    userVideoFrames = await extractFramesFromVideo(file);
-    resultDiv.innerHTML = `<p>${userVideoFrames.length} frames extraites</p>`;
+    const frames = await extractUserVideoFrames(file);
+    window.userFrames = frames; // Stocker globalement
+    
+    resultDiv.innerHTML = `
+      <div class='success'>
+        ✅ ${frames.length} frames extraites<br>
+        <small>Taille vidéo: ${(file.size / 1024 / 1024).toFixed(2)} MB</small>
+      </div>
+    `;
     verifyBtn.disabled = false;
+    
   } catch (error) {
-    resultDiv.innerHTML = `<p style="color:red">Erreur extraction: ${error.message}</p>`;
+    resultDiv.innerHTML = `
+      <div class='error'>
+        ❌ Erreur extraction: ${error.message}
+      </div>
+    `;
   }
 };
 
 verifyBtn.onclick = async () => {
-  if (userVideoFrames.length === 0) {
-    resultDiv.innerHTML = "<p style='color:red'>Veuillez d'abord sélectionner une vidéo</p>";
+  if (!window.userFrames || window.userFrames.length === 0) {
+    resultDiv.innerHTML = "<div class='error'>❌ Veuillez d'abord sélectionner une vidéo</div>";
     return;
   }
   
   try {
-    const verification = await verifyIntegrity(userVideoFrames);
+    const result = await verifyVideoIntegrity(window.userFrames);
     
     let resultHTML = `
-      <h3>Résultat de vérification</h3>
-      <p>Session identifiée: ${verification.bestSession || "Non trouvée"}</p>
-      <p>Frames correspondantes: ${verification.bestMatchCount} / ${verification.totalFrames}</p>
-      <p>Intégrité: ${verification.integrityPercentage.toFixed(2)}%</p>
-      <p>Statut: ${verification.integrityPercentage > 80 ? 
-        '<span style="color:green">✓ Intègre</span>' : 
-        '<span style="color:orange">⚠ Modifications détectées</span>'}</p>
+      <div class="result-card">
+        <h3>📊 Résultats de vérification</h3>
+        <div class="stats">
+          <div class="stat">
+            <span class="stat-label">Frames correspondantes:</span>
+            <span class="stat-value ${result.percentage > 80 ? 'good' : result.percentage > 50 ? 'medium' : 'bad'}">
+              ${result.matched} / ${result.total}
+            </span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Intégrité:</span>
+            <span class="stat-value ${result.percentage > 80 ? 'good' : result.percentage > 50 ? 'medium' : 'bad'}">
+              ${result.percentage.toFixed(1)}%
+            </span>
+          </div>
+        </div>
+        <div class="message ${result.percentage > 80 ? 'good' : result.percentage > 50 ? 'medium' : 'bad'}">
+          ${result.message}
+        </div>
     `;
     
-    // Détail des correspondances
-    if (verification.results.length > 0) {
-      resultHTML += `<details><summary>Détails des correspondances</summary><ul>`;
+    // Afficher quelques détails si disponible
+    if (result.matches.length > 0) {
+      resultHTML += `
+        <details>
+          <summary>Voir les détails (${Math.min(10, result.matches.length)} premières correspondances)</summary>
+          <div class="matches">
+      `;
       
-      verification.results.slice(0, 10).forEach((result, index) => {
-        if (result.matched) {
-          resultHTML += `<li>Frame ${index + 1}: ✓ (${result.similarity.toFixed(1)}%)</li>`;
-        } else {
-          resultHTML += `<li>Frame ${index + 1}: ✗ (non correspondante)</li>`;
-        }
+      result.matches.slice(0, 10).forEach((match, idx) => {
+        resultHTML += `
+          <div class="match">
+            <span>Frame ${idx + 1}:</span>
+            <span>${match.similarity.toFixed(1)}% de similarité</span>
+          </div>
+        `;
       });
       
-      if (verification.results.length > 10) {
-        resultHTML += `<li>... et ${verification.results.length - 10} autres frames</li>`;
-      }
-      
-      resultHTML += `</ul></details>`;
+      resultHTML += `</div></details>`;
     }
+    
+    resultHTML += `</div>`;
     
     resultDiv.innerHTML = resultHTML;
     
-    // Reconstruction si session trouvée
-    if (verification.bestSession && verification.bestMatchCount > 0) {
-      await reconstructVideo(userVideoFrames, verification.bestSession);
-    }
+    // Lancer la reconstruction
+    await reconstructFromStoredFrames();
     
   } catch (error) {
-    resultDiv.innerHTML = `<p style="color:red">Erreur de vérification: ${error.message}</p>`;
+    resultDiv.innerHTML = `
+      <div class="error">
+        ❌ Erreur de vérification: ${error.message}
+      </div>
+    `;
     console.error(error);
   }
 };
