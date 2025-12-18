@@ -1,375 +1,138 @@
 import { supabase } from "./supabaseClient.js";
 
-const videoInput = document.getElementById("uploadedVideo");
 const verifyBtn = document.getElementById("verifyBtn");
 const resultDiv = document.getElementById("result");
 const videoContainer = document.getElementById("videoContainer");
 
-const FRAME_INTERVAL = 300; // 3.3 fps pour la reconstruction
-const SIMILARITY_THRESHOLD = 95; // % de similarité requis
+const FRAME_INTERVAL = 300;
+const HAMMING_THRESHOLD = 8;
 
 // -------------------
-// 1️⃣ Calcul SHA-256 depuis Blob
+// aHash simple
 // -------------------
-async function calculateSHA256FromBlob(blob) {
-  try {
-    const buffer = await blob.arrayBuffer();
-    const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-  } catch (error) {
-    console.error("Erreur calcul hash:", error);
-    return null;
-  }
-}
-
-// -------------------
-// 2️⃣ Similarité entre hashs (pourcentage)
-// -------------------
-function hashSimilarity(hash1, hash2) {
-  if (!hash1 || !hash2 || hash1.length !== hash2.length) return 0;
-  
-  let matches = 0;
-  const minLength = Math.min(hash1.length, hash2.length);
-  
-  for (let i = 0; i < minLength; i++) {
-    if (hash1[i] === hash2[i]) matches++;
-  }
-  
-  return (matches / minLength) * 100;
-}
-
-// -------------------
-// 3️⃣ Extraction des frames de la vidéo utilisateur
-// -------------------
-async function extractUserVideoFrames(videoFile) {
-  return new Promise((resolve, reject) => {
-    const video = document.createElement('video');
-    const url = URL.createObjectURL(videoFile);
-    video.src = url;
-    video.muted = true;
-    video.playsInline = true;
-    
-    video.onloadeddata = async () => {
-      const frames = [];
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
-      
-      // Extraire frames à intervalles réguliers
-      const extractInterval = 200; // ms (5 fps)
-      const duration = video.duration * 1000; // en ms
-      const totalFrames = Math.floor(duration / extractInterval);
-      
-      console.log(`Extraction de ${totalFrames} frames...`);
-      
-      for (let i = 0; i < totalFrames; i++) {
-        const time = (i * extractInterval) / 1000;
-        video.currentTime = time;
-        
-        await new Promise(resolve => {
-          video.onseeked = () => {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            
-            canvas.toBlob(async (blob) => {
-              if (blob) {
-                const hash = await calculateSHA256FromBlob(blob);
-                frames.push({
-                  timestamp: time * 1000,
-                  blob,
-                  hash,
-                  index: i,
-                  dataURL: canvas.toDataURL('image/jpeg', 0.5)
-                });
-              }
-              resolve();
-            }, 'image/jpeg', 0.5);
-          };
-        });
-      }
-      
-      URL.revokeObjectURL(url);
-      resolve(frames);
-    };
-    
-    video.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("Erreur chargement vidéo"));
+async function aHashFromURL(url) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.src = url;
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      const ctx = c.getContext("2d");
+      c.width = 8; c.height = 8;
+      ctx.drawImage(img, 0, 0, 8, 8);
+      const data = ctx.getImageData(0, 0, 8, 8).data;
+      const gray = [];
+      for (let i = 0; i < data.length; i += 4)
+        gray.push((data[i] + data[i + 1] + data[i + 2]) / 3);
+      const avg = gray.reduce((a, b) => a + b, 0) / gray.length;
+      resolve(gray.map(v => (v >= avg ? "1" : "0")).join(''));
     };
   });
 }
 
+function hammingDistance(h1, h2) {
+  let d = 0;
+  for (let i = 0; i < h1.length; i++) if (h1[i] !== h2[i]) d++;
+  return d;
+}
+
 // -------------------
-// 4️⃣ Récupération des hashs depuis la table frame_hashes
+// Récupérer les hashes stockés
 // -------------------
 async function getStoredHashes() {
-  try {
-    // Récupérer les 1000 derniers hashs (ajustez selon vos besoins)
-    const { data, error } = await supabase
-      .from("frame_hashes")
-      .select("hash, timestamp, frame_path")
-      .order("timestamp", { ascending: false })
-      .limit(1000);
-    
-    if (error) throw error;
-    
-    console.log(`${data.length} hashs récupérés depuis la base`);
-    return data;
-    
-  } catch (error) {
-    console.error("Erreur récupération hashs:", error);
-    return [];
-  }
+  const { data, error } = await supabase.from("frame_hashes").select("hash");
+  if (error) throw error;
+  return data.map(d => d.hash);
 }
 
 // -------------------
-// 5️⃣ Vérification d'intégrité
+// Récupérer toutes les frames du dossier frames/
 // -------------------
-async function verifyVideoIntegrity(userFrames) {
-  resultDiv.innerHTML = "<div class='loading'>🔄 Analyse en cours...</div>";
-  
-  // Récupérer les hashs stockés
+async function getStoredFrames() {
+  const { data, error } = await supabase.storage.from("videos").list("", { limit: 1000 });
+  if (error) throw error;
+
+  // Filtrer uniquement les fichiers qui sont dans le dossier frames/
+  const frameNames = data
+    .filter(f => f.name.startsWith("frames/"))
+    .map(f => f.name);
+
+  return frameNames;
+}
+
+// -------------------
+// Télécharger une frame
+// -------------------
+async function downloadFrame(name) {
+  const { data, error } = await supabase.storage.from("videos").download(name);
+  if (error) throw error;
+  return URL.createObjectURL(data);
+}
+
+// -------------------
+// Vérifier toutes les frames
+// -------------------
+async function verifyFrames() {
   const storedHashes = await getStoredHashes();
-  
-  if (storedHashes.length === 0) {
-    return {
-      matched: 0,
-      total: userFrames.length,
-      percentage: 0,
-      message: "Aucun hash trouvé dans la base de données"
-    };
+  const frameNames = await getStoredFrames();
+
+  if (frameNames.length === 0) {
+    throw new Error("Aucune frame trouvée dans le dossier frames/");
   }
-  
-  let matchedFrames = 0;
-  const matches = [];
-  
-  // Comparer chaque frame utilisateur avec les hashs stockés
-  for (const userFrame of userFrames) {
-    let bestMatch = null;
-    let bestSimilarity = 0;
-    
+
+  let validCount = 0;
+  const framesURLs = [];
+
+  for (const name of frameNames) {
+    const frameURL = await downloadFrame(name);
+    framesURLs.push(frameURL);
+
+    const hash = await aHashFromURL(frameURL);
+
     for (const stored of storedHashes) {
-      const similarity = hashSimilarity(userFrame.hash, stored.hash);
-      
-      if (similarity > bestSimilarity && similarity >= SIMILARITY_THRESHOLD) {
-        bestSimilarity = similarity;
-        bestMatch = stored;
+      if (hammingDistance(hash, stored) <= HAMMING_THRESHOLD) {
+        validCount++;
+        break;
       }
     }
-    
-    if (bestMatch) {
-      matchedFrames++;
-      matches.push({
-        userFrame,
-        stored: bestMatch,
-        similarity: bestSimilarity
-      });
-    }
   }
-  
-  const integrityPercentage = (matchedFrames / userFrames.length) * 100;
-  
-  return {
-    matched: matchedFrames,
-    total: userFrames.length,
-    percentage: integrityPercentage,
-    matches: matches,
-    message: integrityPercentage > 80 ? 
-      "✅ Vidéo intègre - Correspondance élevée" :
-      integrityPercentage > 50 ?
-      "⚠️ Vidéo partiellement corrompue - Correspondance moyenne" :
-      "❌ Vidéo altérée - Faible correspondance"
-  };
+
+  return { validCount, total: frameNames.length, framesURLs };
 }
 
 // -------------------
-// 6️⃣ Reconstruction de la vidéo à partir des frames stockées
+// Jouer la vidéo saccadée
 // -------------------
-async function reconstructFromStoredFrames() {
+async function playFrames(frames) {
   videoContainer.innerHTML = "";
-  
-  try {
-    // Récupérer les frames les plus récentes
-    const { data: hashes, error } = await supabase
-      .from("frame_hashes")
-      .select("frame_path")
-      .order("timestamp", { ascending: true })
-      .limit(50); // Limiter à 50 frames pour la démo
-    
-    if (error) throw error;
-    
-    if (hashes.length === 0) {
-      videoContainer.innerHTML = "<p>Aucune frame disponible</p>";
-      return;
-    }
-    
-    const canvas = document.createElement("canvas");
-    canvas.width = 640;
-    canvas.height = 480;
-    canvas.style.border = "2px solid #333";
-    videoContainer.appendChild(canvas);
-    
-    const ctx = canvas.getContext("2d");
-    const info = document.createElement("p");
-    info.textContent = `Reconstruction de ${hashes.length} frames...`;
-    videoContainer.appendChild(info);
-    
-    // Télécharger et afficher chaque frame
-    for (let i = 0; i < hashes.length; i++) {
-      const framePath = hashes[i].frame_path;
-      
-      if (!framePath) continue;
-      
-      try {
-        // Télécharger la frame depuis storage
-        const { data, error } = await supabase.storage
-          .from("videos")
-          .download(framePath);
-        
-        if (error) continue;
-        
-        const url = URL.createObjectURL(data);
-        const img = new Image();
-        
-        await new Promise(resolve => {
-          img.onload = () => {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            
-            // Ajouter info overlay
-            ctx.fillStyle = "rgba(0,0,0,0.6)";
-            ctx.fillRect(10, 10, 180, 40);
-            ctx.fillStyle = "white";
-            ctx.font = "14px Arial";
-            ctx.fillText(`Frame: ${i + 1}/${hashes.length}`, 20, 30);
-            
-            setTimeout(() => {
-              URL.revokeObjectURL(url);
-              resolve();
-            }, FRAME_INTERVAL);
-          };
-          
-          img.src = url;
-        });
-        
-        info.textContent = `Frame ${i + 1}/${hashes.length}`;
-        
-      } catch (err) {
-        console.error("Erreur frame:", err);
-        continue;
-      }
-    }
-    
-    info.textContent = "✅ Reconstruction terminée";
-    
-  } catch (error) {
-    console.error("Erreur reconstruction:", error);
-    videoContainer.innerHTML = "<p>Erreur lors de la reconstruction</p>";
+  const canvas = document.createElement("canvas");
+  canvas.width = 640; canvas.height = 360;
+  videoContainer.appendChild(canvas);
+  const ctx = canvas.getContext("2d");
+
+  for (const frame of frames) {
+    const img = new Image();
+    img.src = frame;
+    await new Promise(res => {
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        setTimeout(res, FRAME_INTERVAL);
+      };
+    });
   }
 }
 
 // -------------------
-// 7️⃣ Gestion événements
+// Bouton Vérifier
 // -------------------
-videoInput.onchange = async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  
-  if (!file.type.startsWith('video/')) {
-    alert("Veuillez sélectionner un fichier vidéo");
-    return;
-  }
-  
-  resultDiv.innerHTML = "<div class='loading'>📹 Extraction des frames...</div>";
-  verifyBtn.disabled = true;
-  
-  try {
-    const frames = await extractUserVideoFrames(file);
-    window.userFrames = frames; // Stocker globalement
-    
-    resultDiv.innerHTML = `
-      <div class='success'>
-        ✅ ${frames.length} frames extraites<br>
-        <small>Taille vidéo: ${(file.size / 1024 / 1024).toFixed(2)} MB</small>
-      </div>
-    `;
-    verifyBtn.disabled = false;
-    
-  } catch (error) {
-    resultDiv.innerHTML = `
-      <div class='error'>
-        ❌ Erreur extraction: ${error.message}
-      </div>
-    `;
-  }
-};
-
 verifyBtn.onclick = async () => {
-  if (!window.userFrames || window.userFrames.length === 0) {
-    resultDiv.innerHTML = "<div class='error'>❌ Veuillez d'abord sélectionner une vidéo</div>";
-    return;
-  }
-  
+  resultDiv.textContent = "Vérification en cours...";
+  videoContainer.innerHTML = "";
   try {
-    const result = await verifyVideoIntegrity(window.userFrames);
-    
-    let resultHTML = `
-      <div class="result-card">
-        <h3>📊 Résultats de vérification</h3>
-        <div class="stats">
-          <div class="stat">
-            <span class="stat-label">Frames correspondantes:</span>
-            <span class="stat-value ${result.percentage > 80 ? 'good' : result.percentage > 50 ? 'medium' : 'bad'}">
-              ${result.matched} / ${result.total}
-            </span>
-          </div>
-          <div class="stat">
-            <span class="stat-label">Intégrité:</span>
-            <span class="stat-value ${result.percentage > 80 ? 'good' : result.percentage > 50 ? 'medium' : 'bad'}">
-              ${result.percentage.toFixed(1)}%
-            </span>
-          </div>
-        </div>
-        <div class="message ${result.percentage > 80 ? 'good' : result.percentage > 50 ? 'medium' : 'bad'}">
-          ${result.message}
-        </div>
-    `;
-    
-    // Afficher quelques détails si disponible
-    if (result.matches.length > 0) {
-      resultHTML += `
-        <details>
-          <summary>Voir les détails (${Math.min(10, result.matches.length)} premières correspondances)</summary>
-          <div class="matches">
-      `;
-      
-      result.matches.slice(0, 10).forEach((match, idx) => {
-        resultHTML += `
-          <div class="match">
-            <span>Frame ${idx + 1}:</span>
-            <span>${match.similarity.toFixed(1)}% de similarité</span>
-          </div>
-        `;
-      });
-      
-      resultHTML += `</div></details>`;
-    }
-    
-    resultHTML += `</div>`;
-    
-    resultDiv.innerHTML = resultHTML;
-    
-    // Lancer la reconstruction
-    await reconstructFromStoredFrames();
-    
-  } catch (error) {
-    resultDiv.innerHTML = `
-      <div class="error">
-        ❌ Erreur de vérification: ${error.message}
-      </div>
-    `;
-    console.error(error);
+    const { validCount, total, framesURLs } = await verifyFrames();
+    resultDiv.textContent = `Frames valides : ${validCount} / ${total}`;
+    await playFrames(framesURLs);
+  } catch (e) {
+    resultDiv.textContent = "Erreur : " + e.message;
   }
 };
