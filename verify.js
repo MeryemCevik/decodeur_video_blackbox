@@ -1,150 +1,154 @@
 import { supabase } from "./supabaseClient.js";
 
-// ----------------------------
-// Éléments HTML
-// ----------------------------
 const videoInput = document.getElementById("uploadedVideo");
 const verifyBtn = document.getElementById("verifyBtn");
 const resultDiv = document.getElementById("result");
 const videoContainer = document.getElementById("videoContainer");
 
-// Intervalle entre chaque frame pour créer la redondance (ms)
 const FRAME_INTERVAL = 300;
+const HAMMING_THRESHOLD = 8;
 
-// Canvas temporaire pour extraire les frames
+// Canvas extraction
 const canvas = document.createElement("canvas");
 const ctx = canvas.getContext("2d");
 
-// ----------------------------
-// 1️⃣ Récupérer tous les hash stockés par l'assureur
-// ----------------------------
-async function getStoredHashes() {
-  const { data, error } = await supabase.from("frame_hashes").select("hash");
-  if (error) throw new Error(error.message);
-  return data.map(f => f.hash); // tableau de hash
+// -------------------
+// aHash perceptuel
+// -------------------
+async function aHashFromDataURL(dataURL) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.src = dataURL;
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      const ctx = c.getContext("2d");
+      c.width = 8;
+      c.height = 8;
+
+      ctx.drawImage(img, 0, 0, 8, 8);
+      const data = ctx.getImageData(0, 0, 8, 8).data;
+
+      const gray = [];
+      for (let i = 0; i < data.length; i += 4) {
+        gray.push((data[i] + data[i + 1] + data[i + 2]) / 3);
+      }
+
+      const avg = gray.reduce((a, b) => a + b, 0) / gray.length;
+      const hash = gray.map(v => (v >= avg ? "1" : "0")).join("");
+      resolve(hash);
+    };
+  });
 }
 
-// ----------------------------
-// 2️⃣ Extraire les frames d'une vidéo
-// ----------------------------
+// -------------------
+// Distance de Hamming
+// -------------------
+function hammingDistance(h1, h2) {
+  let d = 0;
+  for (let i = 0; i < h1.length; i++) {
+    if (h1[i] !== h2[i]) d++;
+  }
+  return d;
+}
+
+// -------------------
+// Hashs stockés
+// -------------------
+async function getStoredHashes() {
+  const { data } = await supabase
+    .from("frame_hashes")
+    .select("hash");
+  return data.map(d => d.hash);
+}
+
+// -------------------
+// Extraction frames vidéo
+// -------------------
 function extractFrames(videoEl) {
   return new Promise(resolve => {
     const frames = [];
 
-    videoEl.addEventListener("loadedmetadata", () => {
+    videoEl.onloadedmetadata = () => {
       canvas.width = videoEl.videoWidth;
       canvas.height = videoEl.videoHeight;
+      videoEl.play();
 
       const capture = setInterval(() => {
         if (videoEl.ended) {
           clearInterval(capture);
-          resolve(frames); // renvoie le tableau de frames
+          resolve(frames);
         } else {
-          ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
-          frames.push(canvas.toDataURL("image/jpeg", 0.7)); // capture frame
+          ctx.drawImage(videoEl, 0, 0);
+          frames.push(canvas.toDataURL("image/jpeg", 0.7));
         }
       }, FRAME_INTERVAL);
-
-      videoEl.play();
-    });
+    };
   });
 }
 
-// ----------------------------
-// 3️⃣ Convertir DataURL en Blob
-// ----------------------------
-function dataURLtoBlob(dataURL) {
-  const [header, base64] = dataURL.split(',');
-  const binary = atob(base64);
-  const array = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) array[i] = binary.charCodeAt(i);
-  return new Blob([array], { type: "image/jpeg" });
-}
-
-// ----------------------------
-// 4️⃣ Calculer le hash SHA-256 d'une frame (Blob)
-// ----------------------------
-async function hashFrame(frameDataURL) {
-  const blob = dataURLtoBlob(frameDataURL); // conversion Blob
-  const arrayBuffer = await blob.arrayBuffer();
-  const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
-
-  // transforme le hash en chaîne hexadécimale
-  return [...new Uint8Array(hashBuffer)]
-    .map(b => b.toString(16).padStart(2, "0"))
-    .join('');
-}
-
-// ----------------------------
-// 5️⃣ Vérifier les frames d'une vidéo
-// ----------------------------
+// -------------------
+// Vérification vidéo
+// -------------------
 async function verifyVideo(videoFile) {
-  const videoURL = URL.createObjectURL(videoFile);
   const videoEl = document.createElement("video");
-  videoEl.src = videoURL;
+  videoEl.src = URL.createObjectURL(videoFile);
   videoEl.muted = true;
 
-  const frames = await extractFrames(videoEl);            // extraire frames
-  const storedHashes = await getStoredHashes();          // hash Supabase
-  const storedHashSet = new Set(storedHashes);           // pour comparaison rapide
+  const frames = await extractFrames(videoEl);
+  const storedHashes = await getStoredHashes();
 
-  const results = [];
-  for (const frameDataURL of frames) {
-    const hash = await hashFrame(frameDataURL);
-    const valid = storedHashSet.has(hash); // true si frame valide
-    results.push({ hash, valid });
+  let validCount = 0;
+
+  for (const frame of frames) {
+    const hash = await aHashFromDataURL(frame);
+
+    for (const stored of storedHashes) {
+      if (hammingDistance(hash, stored) <= HAMMING_THRESHOLD) {
+        validCount++;
+        break;
+      }
+    }
   }
 
-  return { results, frames };
+  return { validCount, total: frames.length, frames };
 }
 
-// ----------------------------
-// 6️⃣ Reconstituer la vidéo saccadée
-// ----------------------------
+// -------------------
+// Lecture saccadée
+// -------------------
 async function playFrames(frames) {
   videoContainer.innerHTML = "";
-
-  const videoCanvas = document.createElement("canvas");
-  const ctx = videoCanvas.getContext("2d");
-  videoContainer.appendChild(videoCanvas);
-
-  videoCanvas.width = 640;
-  videoCanvas.height = 360;
+  const c = document.createElement("canvas");
+  c.width = 640;
+  c.height = 360;
+  videoContainer.appendChild(c);
+  const ctx = c.getContext("2d");
 
   for (const frame of frames) {
     const img = new Image();
     img.src = frame;
     await new Promise(res => {
       img.onload = () => {
-        ctx.drawImage(img, 0, 0, videoCanvas.width, videoCanvas.height);
+        ctx.drawImage(img, 0, 0, c.width, c.height);
         setTimeout(res, FRAME_INTERVAL);
       };
     });
   }
 }
 
-// ----------------------------
-// 7️⃣ Gestion du clic sur le bouton
-// ----------------------------
+// -------------------
+// Bouton vérifier
+// -------------------
 verifyBtn.onclick = async () => {
-  if (!videoInput.files[0]) {
-    alert("Sélectionne une vidéo !");
-    return;
-  }
+  if (!videoInput.files[0]) return;
 
   resultDiv.textContent = "Vérification en cours...";
 
-  try {
-    const videoFile = videoInput.files[0];
-    const { results, frames } = await verifyVideo(videoFile);
+  const { validCount, total, frames } =
+    await verifyVideo(videoInput.files[0]);
 
-    const validCount = results.filter(r => r.valid).length;
-    const total = results.length;
-    resultDiv.textContent = `Frames valides : ${validCount} / ${total}`;
+  resultDiv.textContent =
+    `Frames valides : ${validCount} / ${total}`;
 
-    await playFrames(frames); // visualisation saccadée
-
-  } catch (e) {
-    resultDiv.textContent = "Erreur : " + e.message;
-  }
+  await playFrames(frames);
 };
