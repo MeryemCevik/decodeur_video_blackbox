@@ -5,17 +5,40 @@ const resultDiv = document.getElementById("result");
 const videoContainer = document.getElementById("videoContainer");
 
 const FRAME_INTERVAL = 300;
+const CANVAS_SIZE = 32;
+const HAMMING_THRESHOLD = 10; // tolérance ± bits
 
-// ---------------- SHA256 ----------------
-async function sha256(blob) {
-  const buffer = await blob.arrayBuffer();
-  const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
-  return Array.from(new Uint8Array(hashBuffer))
-    .map(b => b.toString(16).padStart(2, "0"))
-    .join("");
+// ---------------- Visual Hash ----------------
+async function visualHash(blob) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.src = URL.createObjectURL(blob);
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = CANVAS_SIZE;
+      c.height = CANVAS_SIZE;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(img, 0, 0, CANVAS_SIZE, CANVAS_SIZE);
+      const data = ctx.getImageData(0, 0, CANVAS_SIZE, CANVAS_SIZE).data;
+      const gray = [];
+      for (let i = 0; i < data.length; i += 4) {
+        gray.push((data[i]+data[i+1]+data[i+2])/3);
+      }
+      const avg = gray.reduce((a,b)=>a+b,0)/gray.length;
+      const hash = gray.map(v => v >= avg ? "1":"0").join('');
+      resolve(hash);
+    };
+  });
 }
 
-// ---------------- Extraire frames de la vidéo uploadée ----------------
+// ---------------- Hamming Distance ----------------
+function hammingDistance(h1,h2){
+  let d=0;
+  for(let i=0;i<h1.length;i++) if(h1[i]!==h2[i]) d++;
+  return d;
+}
+
+// ---------------- Extraire frames ----------------
 async function extractFrames(file) {
   return new Promise(resolve => {
     const video = document.createElement("video");
@@ -38,89 +61,55 @@ async function extractFrames(file) {
         const blob = await new Promise(r => canvas.toBlob(r, "image/jpeg", 0.7));
         frames.push(blob);
 
-        currentTime += FRAME_INTERVAL / 1000;
-        if (currentTime < video.duration) {
-          video.currentTime = currentTime;
-        } else {
-          resolve(frames);
-        }
+        currentTime += FRAME_INTERVAL/1000;
+        if(currentTime < video.duration) video.currentTime = currentTime;
+        else resolve(frames);
       });
     });
   });
-}
-
-// ---------------- Récupérer frames stockées ----------------
-async function getStoredFrames() {
-  const { data, error } = await supabase.storage.from("videos").list("", { limit: 1000 });
-  if (error) throw error;
-
-  // garder uniquement les fichiers dans frames/
-  const frames = data
-    .filter(f => f.name.startsWith("frames/") && f.name.endsWith(".jpg"))
-    .map(f => f.name);
-
-  if (frames.length === 0) throw new Error("Aucune frame trouvée dans le storage");
-  return frames;
-}
-
-// Télécharger une frame stockée (retourne un Blob)
-async function downloadFrame(path) {
-  const { data, error } = await supabase.storage.from("videos").download(path);
-  if (error) throw error;
-  return data;
 }
 
 // ---------------- Jouer vidéo saccadée ----------------
 async function playFrames(frames) {
   videoContainer.innerHTML = "";
   const canvas = document.createElement("canvas");
-  canvas.width = 640;
-  canvas.height = 360;
+  canvas.width = 640; canvas.height = 360;
   videoContainer.appendChild(canvas);
   const ctx = canvas.getContext("2d");
 
-  for (const blob of frames) {
+  for(const blob of frames){
     const img = new Image();
     img.src = URL.createObjectURL(blob);
-    await new Promise(r => {
-      img.onload = () => {
-        ctx.drawImage(img, 0, 0, 640, 360);
-        setTimeout(r, FRAME_INTERVAL);
-      };
-    });
+    await new Promise(r => { img.onload=()=>{ctx.drawImage(img,0,0,640,360); setTimeout(r,FRAME_INTERVAL);};});
   }
 }
 
 // ---------------- Vérification ----------------
 verifyBtn.onclick = async () => {
   const input = document.getElementById("uploadedVideo");
-  if (!input.files.length) {
-    alert("Sélectionne une vidéo !");
-    return;
-  }
+  if(!input.files.length){ alert("Sélectionne une vidéo !"); return; }
 
   resultDiv.textContent = "Vérification en cours...";
 
-  try {
-    // 1️⃣ frames de la vidéo uploadée
-    const uploadedFrames = await extractFrames(input.files[0]);
+  try{
+    const frames = await extractFrames(input.files[0]);
+    const storedHashes = (await supabase.from("frame_hashes").select("hash")).data.map(d=>d.hash);
 
-    // 2️⃣ hashes stockés
-    const storedHashes = (await supabase.from("frame_hashes").select("hash")).data.map(d => d.hash);
-
-    // 3️⃣ vérifier chaque frame
     let validCount = 0;
-    for (const blob of uploadedFrames) {
-      const hash = await sha256(blob);
-      if (storedHashes.includes(hash)) validCount++;
+    for(const frame of frames){
+      const hash = await visualHash(frame);
+      for(const stored of storedHashes){
+        if(hammingDistance(hash, stored) <= HAMMING_THRESHOLD){
+          validCount++;
+          break;
+        }
+      }
     }
 
-    resultDiv.textContent = `Frames valides : ${validCount} / ${uploadedFrames.length}`;
+    resultDiv.textContent = `Frames valides : ${validCount} / ${frames.length}`;
+    await playFrames(frames);
 
-    // 4️⃣ affichage vidéo saccadée
-    await playFrames(uploadedFrames);
-
-  } catch (e) {
-    resultDiv.textContent = "Erreur : " + e.message;
+  }catch(e){
+    resultDiv.textContent = "Erreur : "+e.message;
   }
 };
