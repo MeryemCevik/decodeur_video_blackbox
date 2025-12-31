@@ -1,17 +1,14 @@
 import { supabase } from "./supabaseClient.js";
 
 const verifyBtn = document.getElementById("verifyBtn");
-const resultDiv = document.getElementById("result");
-const videoContainer = document.getElementById("videoContainer");
+const result = document.getElementById("result");
+const container = document.getElementById("videoContainer");
 
-const FRAME_INTERVAL = 300;
-const HAMMING_THRESHOLD = 10; // tolérance ± bits
+const HASH_SIZE = 32;
+const FRAME_DELAY = 300;
+const HAMMING_LIMIT = 10;
 
-const CANVAS_SIZE = 32;
-
-// -------------------
-// Visual hash
-// -------------------
+// ---------------- HASH ----------------
 async function visualHashFromURL(url) {
   return new Promise(resolve => {
     const img = new Image();
@@ -19,108 +16,108 @@ async function visualHashFromURL(url) {
     img.src = url;
     img.onload = () => {
       const c = document.createElement("canvas");
-      c.width = CANVAS_SIZE; c.height = CANVAS_SIZE;
+      c.width = HASH_SIZE;
+      c.height = HASH_SIZE;
       const ctx = c.getContext("2d");
-      ctx.drawImage(img,0,0,CANVAS_SIZE,CANVAS_SIZE);
-      const data = ctx.getImageData(0,0,CANVAS_SIZE,CANVAS_SIZE).data;
-      const gray = [];
-      for(let i=0;i<data.length;i+=4) gray.push((data[i]+data[i+1]+data[i+2])/3);
+      ctx.drawImage(img,0,0,HASH_SIZE,HASH_SIZE);
+      const d = ctx.getImageData(0,0,HASH_SIZE,HASH_SIZE).data;
+
+      let gray = [];
+      for(let i=0;i<d.length;i+=4)
+        gray.push((d[i]+d[i+1]+d[i+2])/3);
+
       const avg = gray.reduce((a,b)=>a+b,0)/gray.length;
-      const hash = gray.map(v=>v>=avg?"1":"0").join('');
-      resolve(hash);
+      resolve(gray.map(v=>v>=avg?"1":"0").join(""));
     };
   });
 }
 
-function hammingDistance(h1,h2){
+function hamming(a,b){
   let d=0;
-  for(let i=0;i<h1.length;i++) if(h1[i]!==h2[i]) d++;
+  for(let i=0;i<a.length;i++) if(a[i]!==b[i]) d++;
   return d;
 }
 
-// -------------------
-// Hashes stockés
-// -------------------
-async function getStoredHashes() {
-  const { data, error } = await supabase.from("frame_hashes").select("hash");
-  if(error) throw error;
+// ---------------- DATA ----------------
+async function getHashes(){
+  const { data } = await supabase
+    .from("frame_hashes")
+    .select("hash");
   return data.map(d=>d.hash);
 }
 
-// -------------------
-// Frames stockées
-// -------------------
-async function getStoredFrames() {
-  const { data, error } = await supabase.storage.from("videos").list("", { limit: 1000 });
-  if(error) throw error;
-  // ne garder que les frames dans frames/
-  return data.filter(f=>f.name.startsWith("frames/")).map(f=>f.name);
+async function getFrames(){
+  const { data } = await supabase
+    .storage
+    .from("videos")
+    .list("frames", { limit: 1000 });
+
+  return data
+    .filter(f=>f.name.endsWith(".jpg"))
+    .map(f=>`frames/${f.name}`);
 }
 
-// -------------------
-// Télécharger frame
-// -------------------
-async function downloadFrame(name) {
-  const { data, error } = await supabase.storage.from("videos").download(name);
-  if(error) throw error;
+async function downloadFrame(path){
+  const { data } = await supabase
+    .storage
+    .from("videos")
+    .download(path);
+
   return URL.createObjectURL(data);
 }
 
-// -------------------
-// Vérifier frames
-// -------------------
-async function verifyFrames(){
-  const storedHashes = await getStoredHashes();
-  const frameNames = await getStoredFrames();
+// ---------------- VERIFY ----------------
+async function verify(){
+  const hashes = await getHashes();
+  const frames = await getFrames();
 
-  if(frameNames.length===0) throw new Error("Aucune frame dans frames/");
+  if(frames.length === 0)
+    throw new Error("Aucune frame trouvée");
 
-  let validCount = 0;
-  const framesURLs = [];
+  let valid = 0;
+  const urls = [];
 
-  for(const name of frameNames){
-    const url = await downloadFrame(name);
-    framesURLs.push(url);
-    const hash = await visualHashFromURL(url);
-    for(const stored of storedHashes){
-      if(hammingDistance(hash, stored) <= HAMMING_THRESHOLD){
-        validCount++;
-        break;
-      }
-    }
+  for(const f of frames){
+    const url = await downloadFrame(f);
+    urls.push(url);
+    const h = await visualHashFromURL(url);
+
+    if(hashes.some(s => hamming(h,s) <= HAMMING_LIMIT))
+      valid++;
   }
 
-  return { validCount, total: frameNames.length, framesURLs };
+  return { valid, total: frames.length, urls };
 }
 
-// -------------------
-// Jouer vidéo saccadée
-// -------------------
-async function playFrames(frames){
-  videoContainer.innerHTML="";
+// ---------------- PLAY ----------------
+async function play(urls){
+  container.innerHTML = "";
   const canvas = document.createElement("canvas");
-  canvas.width=640; canvas.height=360;
-  videoContainer.appendChild(canvas);
+  canvas.width = 640;
+  canvas.height = 360;
+  container.appendChild(canvas);
   const ctx = canvas.getContext("2d");
 
-  for(const frame of frames){
+  for(const u of urls){
     const img = new Image();
-    img.src = frame;
-    await new Promise(res=>{img.onload=()=>{ctx.drawImage(img,0,0,640,360); setTimeout(res,FRAME_INTERVAL);}} );
+    img.src = u;
+    await new Promise(r=>{
+      img.onload=()=>{
+        ctx.drawImage(img,0,0,640,360);
+        setTimeout(r, FRAME_DELAY);
+      };
+    });
   }
 }
 
-// -------------------
-// Bouton Vérifier
-// -------------------
-verifyBtn.onclick = async ()=>{
-  resultDiv.textContent="Vérification en cours...";
-  videoContainer.innerHTML="";
+// ---------------- UI ----------------
+verifyBtn.onclick = async () => {
+  result.textContent = "Vérification...";
   try{
-    const {validCount,total,framesURLs}=await verifyFrames();
-    resultDiv.textContent=`Frames valides : ${validCount} / ${total}`;
-    await playFrames(framesURLs);
+    const { valid, total, urls } = await verify();
+    result.textContent = `Frames valides : ${valid}/${total}`;
+    await play(urls);
   }catch(e){
-    resultDiv.textContent="Erreur : "+e.message;
+    result.textContent = e.message;
   }
 };
