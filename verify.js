@@ -4,27 +4,40 @@ const verifyBtn = document.getElementById("verifyBtn");
 const resultDiv = document.getElementById("result");
 const videoContainer = document.getElementById("videoContainer");
 
-const FRAME_INTERVAL = 500;
+const FRAME_INTERVAL = 500; // ms
 const CANVAS_SIZE = 32;
+const HAMMING_THRESHOLD = 10; // tolérance pour hash visuel
 
-// ---------------- SHA256 / Visual Hash ----------------
+// ---------------- Visual hash ----------------
 async function visualHash(blob) {
   return new Promise(resolve => {
     const img = new Image();
     img.src = URL.createObjectURL(blob);
     img.onload = () => {
       const c = document.createElement("canvas");
-      c.width = CANVAS_SIZE; c.height = CANVAS_SIZE;
+      c.width = CANVAS_SIZE;
+      c.height = CANVAS_SIZE;
       const ctx = c.getContext("2d");
       ctx.drawImage(img, 0, 0, CANVAS_SIZE, CANVAS_SIZE);
       const data = ctx.getImageData(0, 0, CANVAS_SIZE, CANVAS_SIZE).data;
       const gray = [];
-      for(let i=0;i<data.length;i+=4) gray.push((data[i]+data[i+1]+data[i+2])/3);
+      for (let i = 0; i < data.length; i += 4) {
+        gray.push((data[i] + data[i+1] + data[i+2])/3);
+      }
       const avg = gray.reduce((a,b)=>a+b,0)/gray.length;
-      const hash = gray.map(v=>v>=avg?"1":"0").join('');
+      const hash = gray.map(v => v >= avg ? "1" : "0").join('');
       resolve(hash);
     };
   });
+}
+
+// ---------------- Hamming distance ----------------
+function hammingDistance(h1,h2){
+  let d = 0;
+  for(let i=0;i<h1.length;i++){
+    if(h1[i]!==h2[i]) d++;
+  }
+  return d;
 }
 
 // ---------------- Extraire frames de la vidéo ----------------
@@ -43,7 +56,6 @@ async function extractFrames(file){
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       let currentTime = 0;
-
       video.currentTime = 0;
 
       video.addEventListener("seeked", async function capture(){
@@ -59,11 +71,12 @@ async function extractFrames(file){
   });
 }
 
-// ---------------- Reconstituer vidéo ----------------
+// ---------------- Reconstituer vidéo saccadée ----------------
 async function playFrames(frames){
   videoContainer.innerHTML = "";
   const canvas = document.createElement("canvas");
-  canvas.width = 640; canvas.height = 360;
+  canvas.width = 640;
+  canvas.height = 360;
   videoContainer.appendChild(canvas);
   const ctx = canvas.getContext("2d");
 
@@ -84,13 +97,20 @@ verifyBtn.onclick = async ()=>{
 
   try{
     const frames = await extractFrames(input.files[0]);
-    const { data:hashes, error } = await supabase.from("frame_hashes").select("hash");
+    const { data:hashesData, error } = await supabase.from("frame_hashes").select("hash");
     if(error) throw error;
 
     let validCount = 0;
+    const storedHashes = hashesData.map(h=>h.hash);
+
     for(const blob of frames){
       const hash = await visualHash(blob);
-      if(hashes.map(h=>h.hash).includes(hash)) validCount++;
+      for(const stored of storedHashes){
+        if(hammingDistance(hash, stored) <= HAMMING_THRESHOLD){
+          validCount++;
+          break;
+        }
+      }
     }
 
     resultDiv.textContent=`Frames valides : ${validCount} / ${frames.length}`;
