@@ -14,7 +14,6 @@ async function hashFrame(video, time) {
         canvas.height = video.videoHeight;
         const ctx = canvas.getContext("2d");
 
-        // Ecouteur unique pour seeked
         const onSeeked = () => {
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             video.removeEventListener('seeked', onSeeked);
@@ -24,28 +23,28 @@ async function hashFrame(video, time) {
                 const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
                 const hashArray = Array.from(new Uint8Array(hashBuffer));
                 const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-                console.log(`Hash frame à ${time.toFixed(2)}s :`, hashHex.slice(0,16), "..."); // debug
+                console.log(`Hash frame à ${time.toFixed(2)}s : ${hashHex.slice(0,16)}...`);
                 resolve(hashHex);
             }, 'image/png');
         };
 
         video.addEventListener('seeked', onSeeked);
-        video.currentTime = Math.min(time, video.duration - 0.05); // éviter dépassement
+        video.currentTime = Math.min(time, video.duration - 0.05);
     });
 }
 
-// Récupérer les hashes stockés côté Supabase
+// Récupération des hashes stockés
 async function getStoredHashes() {
     const { data, error } = await supabase.from('frame_hashes').select('hash');
     if (error) {
         console.error("Erreur récupération hashes:", error);
         throw new Error("Erreur récupération hashes depuis Supabase");
     }
-    console.log("Hashes stockés récupérés :", data.length, "hashes");
+    console.log("Hashes récupérés :", data.length);
     return data.map(d => d.hash);
 }
 
-// Fonction principale de vérification
+// Fonction principale
 async function verifyVideo(file) {
     resultDiv.textContent = "Vérification en cours...";
     videoContainer.innerHTML = "";
@@ -58,42 +57,54 @@ async function verifyVideo(file) {
     videoElem.width = 400;
     videoContainer.appendChild(videoElem);
 
-    // ATTENDRE la metadata pour la durée
+    // ATTENTE des metadata
     await new Promise(resolve => videoElem.addEventListener('loadedmetadata', resolve));
-    console.log("Durée de la vidéo :", videoElem.duration, "s");
+    console.log("Video metadata loaded, durée :", videoElem.duration);
+
+    // Si duration = Infinity (problème .webm)
+    if (!isFinite(videoElem.duration)) {
+        console.warn("Durée vidéo = Infinity, attendre un peu...");
+        await new Promise(r => setTimeout(r, 500));
+        console.log("Nouvelle durée :", videoElem.duration);
+    }
 
     const storedHashes = await getStoredHashes();
     if (!storedHashes.length) {
-        console.warn("Aucun hash stocké pour comparaison ! Vérifier l'encodeur.");
+        console.warn("Aucun hash stocké !");
         resultDiv.textContent = "Erreur : aucun hash stocké pour comparaison.";
         return;
     }
 
-    const fps = 2; // frames par seconde pour vérification
+    const fps = 2;
     let validFrames = 0;
     const totalFrames = Math.ceil(videoElem.duration * fps);
-    console.log("Total frames à vérifier (estimé) :", totalFrames);
 
-    // Boucle sur les frames
+    // Affichage compteur en direct
+    resultDiv.textContent = `Vérification : 0 / ${totalFrames}`;
+
     for (let t = 0; t < videoElem.duration; t += 1 / fps) {
-        try {
-            const hash = await hashFrame(videoElem, t);
-            // Vérification stricte
-            if (storedHashes.includes(hash)) {
-                validFrames++;
-            } else {
-                console.warn(`Frame à ${t.toFixed(2)}s non trouvée dans Supabase`);
-            }
-        } catch (err) {
-            console.error("Erreur lors du hash d'une frame :", err);
+        const hash = await hashFrame(videoElem, t);
+
+        // Comparaison stricte
+        const found = storedHashes.includes(hash);
+        if (found) validFrames++;
+
+        // DEBUG : afficher mismatch partiel
+        if (!found) {
+            const matchPartial = storedHashes.some(h => h.startsWith(hash.slice(0, 8)));
+            if (matchPartial) console.log(`Frame ${t.toFixed(2)}s : hash proche trouvé (premiers caractères match)`);
+            else console.log(`Frame ${t.toFixed(2)}s : hash non trouvé du tout`);
         }
+
+        // Update compteur live
+        resultDiv.textContent = `Vérification : ${validFrames} / ${totalFrames}`;
     }
 
     console.log(`Frames valides : ${validFrames} / ${totalFrames}`);
-    resultDiv.textContent = `Frames valides : ${validFrames} / ${totalFrames} | ${validFrames === totalFrames ? "Intégrité OK ✅" : "Frames modifiées ❌"}`;
+    resultDiv.textContent += ` | ${validFrames === totalFrames ? "Intégrité OK ✅" : "Frames modifiées ❌"}`;
 }
 
-// Bouton vérifier
+// Bouton
 verifyBtn.addEventListener("click", async () => {
     if (!uploadedVideo.files.length) {
         alert("Veuillez sélectionner une vidéo");
@@ -102,6 +113,6 @@ verifyBtn.addEventListener("click", async () => {
     await verifyVideo(uploadedVideo.files[0]);
 });
 
-// Statut réseau optionnel (debug)
+// Statut réseau debug
 window.addEventListener('online', () => console.log("Connexion réseau : en ligne"));
 window.addEventListener('offline', () => console.log("Connexion réseau : hors ligne"));
