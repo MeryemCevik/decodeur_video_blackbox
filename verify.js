@@ -59,32 +59,41 @@ async function verifyVideo() {
     const videoId = videoIdInput.value.trim();
 
     if (!videoId) {
-        alert("Saisis le video_id.");
+        alert("Veuillez saisir le video_id utilisé lors de l'encodage.");
         return;
     }
 
     if (!file) {
-        alert("Choisis une vidéo.");
+        alert("Veuillez sélectionner une vidéo.");
         return;
     }
 
     resultDiv.textContent = "Extraction des frames…";
 
+    // 1) Extraction + hash côté décodeur
     const extractedHashes = await extractFrames(file, 500);
 
-    const { data } = await supabase
+    // 2) Récupération des hashes stockés pour ce video_id
+    const { data, error } = await supabase
         .from("frame_hashes")
         .select("frame_index, hash")
         .eq("video_id", videoId)
-        .order("frame_index");
+        .order("frame_index", { ascending: true });
+
+    if (error) {
+        console.error(error);
+        resultDiv.textContent = "Erreur récupération des hashes côté serveur.";
+        return;
+    }
 
     if (!data || data.length === 0) {
         resultDiv.textContent = "Aucun hash trouvé pour ce video_id.";
         return;
     }
 
-    const storedHashes = data.map(r => r.hash);
+    const storedHashes = data.map(row => row.hash);
 
+    // 3) Comparaison stricte index par index
     const minLen = Math.min(extractedHashes.length, storedHashes.length);
     let matches = 0;
 
@@ -99,11 +108,13 @@ async function verifyVideo() {
         <p>Correspondances exactes : ${matches}</p>
         <p>Taux de match : ${(ratio * 100).toFixed(1)}%</p>
         <p>Intégrité : ${
-            ratio === 1 ? "<span style='color:green'>100% – OK</span>" :
-                          "<span style='color:red'>Altération détectée</span>"
+            ratio === 1
+                ? "<span style='color:green'>100% – OK</span>"
+                : "<span style='color:red'>Altération détectée</span>"
         }</p>
     `;
 
+    // 4) Affichage vidéo
     videoContainer.innerHTML = "";
     const vid = document.createElement("video");
     vid.src = URL.createObjectURL(file);
