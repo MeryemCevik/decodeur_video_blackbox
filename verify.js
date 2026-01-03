@@ -1,32 +1,25 @@
 import { supabase } from "./supabaseClient.js";
 
 /* =========================
-   HASH CANVAS COMMUN
-   ========================= */
-async function hashCanvas(canvas) {
-    const ctx = canvas.getContext("2d");
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imgData.data;
-
-    // conversion en niveaux de gris
-    for (let i = 0; i < data.length; i += 4) {
-        const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-        data[i] = data[i + 1] = data[i + 2] = gray;
-    }
-
-    const buffer = await crypto.subtle.digest("SHA-256", imgData.data);
-    return Array.from(new Uint8Array(buffer))
-        .map(b => b.toString(16).padStart(2, "0"))
-        .join("");
-}
-
-/* =========================
    DOM
    ========================= */
 const uploadedVideo = document.getElementById("uploadedVideo");
 const verifyBtn = document.getElementById("verifyBtn");
 const resultDiv = document.getElementById("result");
 const videoContainer = document.getElementById("videoContainer");
+
+/* =========================
+   HASH CANVAS (même que encodeur)
+   ========================= */
+async function hashCanvas(canvas) {
+    const ctx = canvas.getContext("2d");
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const buffer = imageData.data.buffer;
+    const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+    return Array.from(new Uint8Array(hashBuffer))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+}
 
 /* =========================
    HASH FRAME
@@ -40,11 +33,10 @@ async function hashFrame(video, time) {
 
         const onSeeked = async () => {
             video.removeEventListener("seeked", onSeeked);
-            await new Promise(r => setTimeout(r, 80));
+            await new Promise(r => setTimeout(r, 80)); // laisser frame se stabiliser
 
             ctx.drawImage(video, 0, 0, 32, 32);
             const hash = await hashCanvas(canvas);
-
             console.log(`[DECODEUR] ${time.toFixed(2)}s → ${hash.slice(0,16)}…`);
             resolve(hash);
         };
@@ -55,19 +47,21 @@ async function hashFrame(video, time) {
 }
 
 /* =========================
-   HASHES ENCODEUR
+   RÉCUPÉRATION HASHES ENCODEUR
    ========================= */
 async function getStoredHashes() {
-    const { data } = await supabase
+    const { data, error } = await supabase
         .from("frame_hashes")
         .select("hash");
+
+    if (error) throw error;
 
     console.log(`[DECODEUR] ${data.length} hashes récupérés`);
     return data.map(d => d.hash);
 }
 
 /* =========================
-   VÉRIFICATION
+   VÉRIFICATION VIDÉO
    ========================= */
 async function verifyVideo(file) {
     resultDiv.textContent = "Vérification en cours…";
@@ -104,7 +98,7 @@ async function verifyVideo(file) {
     }
 
     const percent = Math.round((matched / total) * 100);
-    console.log(`[DECODEUR] Résultat : ${percent}%`);
+    console.log(`[DECODEUR] Résultat final : ${percent}%`);
 
     resultDiv.textContent =
         percent >= 70
@@ -117,4 +111,3 @@ verifyBtn.addEventListener("click", () => {
         verifyVideo(uploadedVideo.files[0]);
     }
 });
-
