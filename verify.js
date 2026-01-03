@@ -1,126 +1,112 @@
 import { supabase } from "./supabaseClient.js";
 
-const fileInput = document.getElementById("uploadedVideo");
+// DOM Elements
+const uploadedVideo = document.getElementById("uploadedVideo");
 const verifyBtn = document.getElementById("verifyBtn");
 const resultDiv = document.getElementById("result");
 const videoContainer = document.getElementById("videoContainer");
-const videoIdInput = document.getElementById("videoIdInput");
 
-// Extraction des frames depuis la vidéo fournie
-async function extractFrames(videoBlob, intervalMs = 500) {
-    return new Promise((resolve) => {
-        const videoEl = document.createElement("video");
-        videoEl.src = URL.createObjectURL(videoBlob);
-        videoEl.muted = true;
-        videoEl.preload = "metadata";
+// HASH D’UNE VIDEO WEBM
+async function hashWebMFrames(videoBlob) {
+    const url = URL.createObjectURL(videoBlob);
+    const video = document.createElement("video");
+    video.src = url;
+    video.muted = true;
+    video.playsInline = true;
 
-        const canvas = document.createElement("canvas");
-        const ctx = canvas.getContext("2d");
+    // Attendre que les métadonnées soient chargées
+    await new Promise(resolve => video.onloadedmetadata = resolve);
 
-        const hashes = [];
-        let currentTime = 0;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
 
-        videoEl.onloadedmetadata = () => {
-            canvas.width = videoEl.videoWidth;
-            canvas.height = videoEl.videoHeight;
+    const fps = 2; // 1 frame toutes les 500ms
+    const step = 1 / fps;
+    const hashes = [];
 
-            function seek() {
-                if (currentTime > videoEl.duration) {
-                    resolve(hashes);
-                    return;
-                }
-                videoEl.currentTime = currentTime;
-            }
+    for (let t = 0; t < video.duration; t += step) {
+        video.currentTime = t;
+        await new Promise(resolve => video.onseeked = resolve);
 
-            videoEl.onseeked = async () => {
-                ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-                const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
-                const buffer = await blob.arrayBuffer();
+        const blob = await new Promise(r => canvas.toBlob(r, "image/png"));
+        const buffer = await blob.arrayBuffer();
 
-                const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
-                const hashHex = Array.from(new Uint8Array(hashBuffer))
-                    .map(b => b.toString(16).padStart(2, "0"))
-                    .join("");
+        const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+        const hashHex = Array.from(new Uint8Array(hashBuffer))
+            .map(b => b.toString(16).padStart(2, "0"))
+            .join("");
 
-                hashes.push(hashHex);
+        hashes.push(hashHex);
+        console.log(`[DECODEUR] Frame ${t.toFixed(2)}s → Hash calculé : ${hashHex}`);
+    }
 
-                currentTime += intervalMs / 1000;
-                seek();
-            };
-
-            seek();
-        };
-    });
+    URL.revokeObjectURL(url);
+    return hashes;
 }
 
-async function verifyVideo() {
-    const file = fileInput.files[0];
-    const videoId = videoIdInput.value.trim();
-
-    if (!videoId) {
-        alert("Veuillez saisir le video_id utilisé lors de l'encodage.");
-        return;
-    }
-
-    if (!file) {
-        alert("Veuillez sélectionner une vidéo.");
-        return;
-    }
-
-    resultDiv.textContent = "Extraction des frames…";
-
-    // 1) Extraction + hash côté décodeur
-    const extractedHashes = await extractFrames(file, 500);
-
-    // 2) Récupération des hashes stockés pour ce video_id
-    const { data, error } = await supabase
+// Récupérer les hashs stockés sur Supabase
+async function getStoredHashes() {
+    const { data } = await supabase
         .from("frame_hashes")
-        .select("frame_index, hash")
-        .eq("video_id", videoId)
-        .order("frame_index", { ascending: true });
+        .select("hash");
 
-    if (error) {
-        console.error(error);
-        resultDiv.textContent = "Erreur récupération des hashes côté serveur.";
-        return;
-    }
+    console.log(`[DECODEUR] ${data.length} hashes récupérés depuis Supabase`);
+    data.forEach((d, i) => console.log(`Stored hash ${i}: ${d.hash}`));
 
-    if (!data || data.length === 0) {
-        resultDiv.textContent = "Aucun hash trouvé pour ce video_id.";
-        return;
-    }
-
-    const storedHashes = data.map(row => row.hash);
-
-    // 3) Comparaison stricte index par index
-    const minLen = Math.min(extractedHashes.length, storedHashes.length);
-    let matches = 0;
-
-    for (let i = 0; i < minLen; i++) {
-        if (extractedHashes[i] === storedHashes[i]) matches++;
-    }
-
-    const ratio = matches / minLen;
-
-    resultDiv.innerHTML = `
-        <p>Frames comparées : ${minLen}</p>
-        <p>Correspondances exactes : ${matches}</p>
-        <p>Taux de match : ${(ratio * 100).toFixed(1)}%</p>
-        <p>Intégrité : ${
-            ratio === 1
-                ? "<span style='color:green'>100% – OK</span>"
-                : "<span style='color:red'>Altération détectée</span>"
-        }</p>
-    `;
-
-    // 4) Affichage vidéo
-    videoContainer.innerHTML = "";
-    const vid = document.createElement("video");
-    vid.src = URL.createObjectURL(file);
-    vid.controls = true;
-    vid.width = 400;
-    videoContainer.appendChild(vid);
+    return data.map(d => d.hash);
 }
 
-verifyBtn.addEventListener("click", verifyVideo);
+// Vérification de la vidéo
+async function verifyVideo(file) {
+    resultDiv.textContent = "Vérification en cours…";
+    videoContainer.innerHTML = "";
+
+    const videoElement = document.createElement("video");
+    videoElement.src = URL.createObjectURL(file);
+    videoElement.muted = true;
+    videoContainer.appendChild(videoElement);
+
+    await new Promise(resolve => videoElement.onloadedmetadata = resolve);
+
+    console.log("[DECODEUR] Durée vidéo :", videoElement.duration);
+
+    // Calculer les hashes de la vidéo uploadée
+    const videoHashes = await hashWebMFrames(file);
+
+    // Récupérer les hashes stockés
+    const storedHashes = await getStoredHashes();
+
+    // Comparaison
+    let total = videoHashes.length;
+    let matched = 0;
+
+    videoHashes.forEach((hash, i) => {
+        const matchIndex = storedHashes.indexOf(hash);
+        if (matchIndex >= 0) {
+            matched++;
+            console.log(`✔ Frame ${i} → Match ! (hash vidéo: ${hash}, hash stocké: ${storedHashes[matchIndex]})`);
+        } else {
+            console.warn(`✘ Frame ${i} → Mismatch (hash vidéo: ${hash})`);
+        }
+        resultDiv.textContent = `${matched} / ${total}`;
+    });
+
+    const percent = Math.round((matched / total) * 100);
+    console.log(`[DECODEUR] Résultat final : ${percent}% de correspondance`);
+
+    resultDiv.textContent =
+        percent >= 70
+            ? `Intégrité OK (${percent}%)`
+            : `Vidéo altérée (${percent}%)`;
+}
+
+// Event listener
+verifyBtn.addEventListener("click", () => {
+    if (uploadedVideo.files.length) {
+        verifyVideo(uploadedVideo.files[0]);
+    }
+});
