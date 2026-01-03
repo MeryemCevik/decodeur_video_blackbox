@@ -1,6 +1,26 @@
 import { supabase } from "./supabaseClient.js";
 
 /* =========================
+   HASH CANVAS COMMUN
+   ========================= */
+async function hashCanvas(canvas) {
+    const ctx = canvas.getContext("2d");
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imgData.data;
+
+    // conversion en niveaux de gris
+    for (let i = 0; i < data.length; i += 4) {
+        const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        data[i] = data[i + 1] = data[i + 2] = gray;
+    }
+
+    const buffer = await crypto.subtle.digest("SHA-256", imgData.data);
+    return Array.from(new Uint8Array(buffer))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+}
+
+/* =========================
    DOM
    ========================= */
 const uploadedVideo = document.getElementById("uploadedVideo");
@@ -97,3 +117,4 @@ verifyBtn.addEventListener("click", () => {
         verifyVideo(uploadedVideo.files[0]);
     }
 });
+
