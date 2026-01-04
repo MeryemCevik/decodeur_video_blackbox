@@ -2,57 +2,40 @@ import { supabase } from "./supabaseClient.js";
 
 document.addEventListener("DOMContentLoaded", () => {
 
-    console.log("Décodeur chargé");
+    console.log("🔵 Décodeur chargé");
 
     const fileInput = document.getElementById("uploadedVideo");
     const verifyBtn = document.getElementById("verifyBtn");
     const resultDiv = document.getElementById("result");
     const videoContainer = document.getElementById("videoContainer");
 
-    /* =========================
-       RÉCUPÉRATION DES HASHES
-       ========================= */
+    // Récupération hashes serveur
     async function getServerHashes() {
-        console.log("Récupération des hashes serveur...");
+        console.log("📡 Récupération des hashes serveur...");
+        const { data, error } = await supabase.from("frame_hashes").select("hash");
+        if (error) return console.error(error), [];
 
-        const { data, error } = await supabase
-            .from("frame_hashes")
-            .select("hash");
+        console.group("📦 Hashes serveur");
+        data.forEach((h, i) => console.log(i, h.hash));
+        console.groupEnd();
 
-        if (error) {
-            console.error("Erreur Supabase :", error);
-            return [];
-        }
-
-        console.log("Hashes récupérés :", data.length);
         return data.map(h => h.hash);
     }
 
-    /* =========================
-       HASH D’UNE FRAME
-       ========================= */
+    // Hash d’une frame
     async function hashFrame(canvas) {
-        const blob = await new Promise(resolve =>
-            canvas.toBlob(resolve, "image/png")
-        );
-
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
         const buffer = await blob.arrayBuffer();
         const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
         const hashArray = Array.from(new Uint8Array(hashBuffer));
-
-        return hashArray
-            .map(b => b.toString(16).padStart(2, "0"))
-            .join("");
+        return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
     }
 
-    /* =========================
-       EXTRACTION DES FRAMES
-       ========================= */
+    // Extraction frames vidéo
     async function extractVideoHashes(videoBlob) {
-        console.log("Extraction des frames vidéo");
+        console.log("🎞️ Extraction frames vidéo");
 
         return new Promise(resolve => {
-
             const video = document.createElement("video");
             video.src = URL.createObjectURL(videoBlob);
             video.muted = true;
@@ -63,39 +46,34 @@ document.addEventListener("DOMContentLoaded", () => {
 
             const canvas = document.createElement("canvas");
             const ctx = canvas.getContext("2d");
-
             const hashes = [];
             const INTERVAL = 500;
 
             video.addEventListener("loadedmetadata", () => {
                 canvas.width = video.videoWidth;
                 canvas.height = video.videoHeight;
-
-                console.log("Durée vidéo :", video.duration, "s");
-
                 video.play();
 
                 const timer = setInterval(async () => {
                     if (video.ended) {
                         clearInterval(timer);
-                        console.log("Fin extraction :", hashes.length);
+                        console.group("🎥 Hashes vidéo");
+                        hashes.forEach((h, i) => console.log(i, h));
+                        console.groupEnd();
                         resolve(hashes);
                         return;
                     }
 
-                    console.log("Frame à", video.currentTime.toFixed(2), "s");
                     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                     const hash = await hashFrame(canvas);
                     hashes.push(hash);
-
+                    console.log("📸 Hash frame :", hash);
                 }, INTERVAL);
             });
         });
     }
 
-    /* =========================
-       VÉRIFICATION (SEUIL 60 %)
-       ========================= */
+    // Vérification intégrité (60 %)
     async function verifyVideo(videoBlob) {
         resultDiv.textContent = "Analyse en cours...";
 
@@ -103,42 +81,26 @@ document.addEventListener("DOMContentLoaded", () => {
         const videoHashes = await extractVideoHashes(videoBlob);
 
         let matchCount = 0;
-
-        videoHashes.forEach((h, i) => {
-            if (serverHashes.includes(h)) {
-                console.log("MATCH frame", i);
-                matchCount++;
-            } else {
-                console.log("NO MATCH frame", i);
-            }
+        videoHashes.forEach(hash => {
+            if (serverHashes.includes(hash)) matchCount++, console.log("✅ MATCH hash :", hash);
+            else console.log("❌ NO MATCH hash :", hash);
         });
 
         const ratio = matchCount / videoHashes.length;
         const percent = (ratio * 100).toFixed(2);
 
         if (ratio >= 0.6) {
-            resultDiv.textContent =
-                `Vidéo VALIDE
-                 ${matchCount}/${videoHashes.length} frames (${percent} %)`;
+            resultDiv.textContent = `✅ Vidéo VALIDE\n${matchCount}/${videoHashes.length} frames (${percent} %)`;
         } else {
-            resultDiv.textContent =
-                `Vidéo NON valide
-                 ${matchCount}/${videoHashes.length} frames (${percent} %)`;
+            resultDiv.textContent = `❌ Vidéo NON valide\n${matchCount}/${videoHashes.length} frames (${percent} %)`;
         }
     }
 
-    /* =========================
-       BOUTON VÉRIFIER
-       ========================= */
+    // Bouton vérifier
     verifyBtn.addEventListener("click", async () => {
         const file = fileInput.files[0];
-
-        if (!file) {
-            resultDiv.textContent = "Veuillez sélectionner une vidéo.";
-            return;
-        }
-
-        console.log("Vidéo sélectionnée :", file.name);
+        if (!file) return resultDiv.textContent = "Veuillez sélectionner une vidéo.";
+        console.log("🎥 Vidéo sélectionnée :", file.name);
         await verifyVideo(file);
     });
 
