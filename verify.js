@@ -1,78 +1,81 @@
-// script.js pour le décodeur
 import { supabase } from "./supabaseClient.js";
 
 const video = document.getElementById("preview");
 const recordBtn = document.getElementById("recordBtn");
 const uploadBtn = document.getElementById("uploadBtn");
-const status = document.getElementById("status");
+const statusDiv = document.getElementById("status");
 
-let stream;
-let frames = [];
-let hashList = [];
+let mediaRecorder;
+let recordedChunks = [];
+let driverVideoBlob;
 
-// initialisation caméra
-async function initCamera() {
-    try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        video.srcObject = stream;
-    } catch (err) {
-        console.error("Erreur d'accès à la caméra :", err);
-        status.textContent = "Erreur d'accès à la caméra.";
+// Récupérer les hashes du serveur
+async function getStoredHashes() {
+    const { data, error } = await supabase.from("frame_hashes").select("*");
+    if (error) {
+        console.error("Erreur récupération hashes : ", error.message);
+        return [];
     }
+    return data.map(d => d.hash);
 }
 
-// capture frame
-async function captureFrame() {
+// Découpage vidéo en frames
+async function extractFrames(blob) {
+    const videoEl = document.createElement("video");
+    videoEl.src = URL.createObjectURL(blob);
+    await videoEl.play();
+
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
+    canvas.width = videoEl.videoWidth;
+    canvas.height = videoEl.videoHeight;
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    const frames = [];
+    const INTERVAL = 200; // ms
 
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const frameData = canvas.toDataURL("image/jpeg");
-    frames.push(frameData);
+    return new Promise(resolve => {
+        const intervalId = setInterval(() => {
+            if (videoEl.ended) {
+                clearInterval(intervalId);
+                resolve(frames);
+                return;
+            }
+            ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+            canvas.toBlob(async blob => {
+                const hash = await generateHash(blob);
+                frames.push(hash);
+            }, "image/png");
+        }, INTERVAL);
+    });
+}
 
-    const hashBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(frameData));
+// Fonction de hash identique à l'encodeur
+async function generateHash(blob) {
+    const arrayBuffer = await blob.arrayBuffer();
+    const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    hashList.push(hashHex);
-    return hashHex;
+    return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-// comparaison des hashs avec Supabase
-async function verifyHashes() {
-    status.textContent = "Vérification de l'intégrité...";
-    const { data: storedHashes, error } = await supabase
-        .from("frame_hashes")
-        .select("hash");
+// Comparer les hashes pour vérifier intégrité
+async function verifyVideo(blob) {
+    const storedHashes = await getStoredHashes();
+    const videoHashes = await extractFrames(blob);
 
-    if (error) {
-        console.error("Erreur récupération hashs :", error);
-        return;
-    }
-
-    let matches = 0;
-    for (let hash of hashList) {
-        if (storedHashes.some(h => h.hash === hash)) matches++;
-    }
-
-    status.textContent = `Intégrité vérifiée : ${matches} frames correspondent sur ${hashList.length}.`;
+    const matches = videoHashes.filter(h => storedHashes.includes(h));
+    statusDiv.textContent = `Intégrité vérifiée : ${matches.length}/${videoHashes.length} frames correspondent`;
 }
 
-// bouton pour démarrer l'enregistrement et la vérification
-recordBtn.addEventListener("click", () => {
-    frames = [];
-    hashList = [];
-    
-    const captureInterval = setInterval(captureFrame, 200);
+// Charger la vidéo du conducteur
+uploadBtn.addEventListener("click", async () => {
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = "video/*";
 
-    // stop après 3 secondes (ou selon besoin)
-    setTimeout(async () => {
-        clearInterval(captureInterval);
-        await verifyHashes();
-    }, 3000);
+    fileInput.onchange = async e => {
+        driverVideoBlob = e.target.files[0];
+        await verifyVideo(driverVideoBlob);
+    };
+
+    fileInput.click();
 });
-
-// initialisation caméra
-initCamera();
