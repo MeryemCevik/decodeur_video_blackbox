@@ -1,40 +1,38 @@
 import { supabase } from "./supabaseClient.js";
 
 document.addEventListener("DOMContentLoaded", () => {
-    console.log("Décodeur chargé");
-
     const fileInput = document.getElementById("uploadedVideo");
     const verifyBtn = document.getElementById("verifyBtn");
     const resultDiv = document.getElementById("result");
     const videoContainer = document.getElementById("videoContainer");
 
-    const TIME_THRESHOLD = 1000; // ms tolérance pour created_at
+    const DHASH_WIDTH = 9;
+    const DHASH_HEIGHT = 8;
+    const MAX_HAMMING = 15; // tolérance 15 bits
 
-    // Récup hashes serveur
-    async function getServerHashes() {
-        const { data, error } = await supabase
-            .from("frame_hashes")
-            .select("hash, created_at");
+    // Distance de Hamming
+    function hammingDistance(hash1, hash2) {
+        let dist = 0;
+        for (let i = 0; i < hash1.length; i++) if (hash1[i] !== hash2[i]) dist++;
+        return dist;
+    }
 
-        if (error) {
-            console.error("Erreur récupération hashes:", error);
-            return [];
+    async function computeDHash(canvas) {
+        const ctx = canvas.getContext("2d");
+        const imgData = ctx.getImageData(0, 0, DHASH_WIDTH, DHASH_HEIGHT);
+        let hash = "";
+        for (let y = 0; y < DHASH_HEIGHT; y++) {
+            for (let x = 0; x < DHASH_WIDTH - 1; x++) {
+                const idx = (y * DHASH_WIDTH + x) * 4;
+                const lum1 = 0.299 * imgData.data[idx] + 0.587 * imgData.data[idx + 1] + 0.114 * imgData.data[idx + 2];
+                const idx2 = (y * DHASH_WIDTH + x + 1) * 4;
+                const lum2 = 0.299 * imgData.data[idx2] + 0.587 * imgData.data[idx2 + 1] + 0.114 * imgData.data[idx2 + 2];
+                hash += lum1 > lum2 ? "1" : "0";
+            }
         }
-
-        console.log(`Hashes serveur récupérés : ${data.length}`);
-        return data;
+        return hash;
     }
 
-    // Hash d'une frame
-    async function hashFrame(canvas) {
-        const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
-        const buffer = await blob.arrayBuffer();
-        const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
-    }
-
-    // Extraction des frames + hash + created_at approximatif
     async function extractVideoHashes(videoBlob) {
         return new Promise(resolve => {
             const video = document.createElement("video");
@@ -45,26 +43,19 @@ document.addEventListener("DOMContentLoaded", () => {
             videoContainer.appendChild(video);
 
             const canvas = document.createElement("canvas");
-            const ctx = canvas.getContext("2d");
+            canvas.width = DHASH_WIDTH;
+            canvas.height = DHASH_HEIGHT;
 
             const hashes = [];
-            const INTERVAL = 500;
+            const INTERVAL = 1000;
 
             video.addEventListener("loadedmetadata", () => {
-                canvas.width = video.videoWidth;
-                canvas.height = video.videoHeight;
-
                 video.play();
-
                 const timer = setInterval(async () => {
-                    if (video.ended) {
-                        clearInterval(timer);
-                        resolve(hashes);
-                        return;
-                    }
-
-                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                    const hash = await hashFrame(canvas);
+                    if (video.ended) { clearInterval(timer); resolve(hashes); return; }
+                    const ctx = canvas.getContext("2d");
+                    ctx.drawImage(video, 0, 0, DHASH_WIDTH, DHASH_HEIGHT);
+                    const hash = await computeDHash(canvas);
                     const created_at = new Date().toISOString();
                     hashes.push({ hash, created_at });
                 }, INTERVAL);
@@ -72,45 +63,42 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    // Vérification intégrité
+    async function getServerHashes() {
+        const { data, error } = await supabase.from("frame_hashes").select("hash, created_at").order("created_at", { ascending: true });
+        if (error) { console.error(error); return []; }
+        return data;
+    }
+
     async function verifyVideo(videoBlob) {
-        resultDiv.textContent = "Analyse en cours...";
-        const serverData = await getServerHashes();
+        resultDiv.textContent = "🔍 Analyse en cours...";
+        const serverHashes = await getServerHashes();
         const videoHashes = await extractVideoHashes(videoBlob);
 
         let matchCount = 0;
+        let lastMatchedIndex = 0;
 
         videoHashes.forEach((vFrame, i) => {
-            const matched = serverData.find(sFrame => 
-                sFrame.hash === vFrame.hash &&
-                Math.abs(new Date(sFrame.created_at) - new Date(vFrame.created_at)) <= TIME_THRESHOLD
-            );
-            if (matched) {
-                console.log(`✅ MATCH frame ${i} hash=${vFrame.hash}`);
+            // Cherche correspondance seulement dans les 50 hashes suivants
+            const slice = serverHashes.slice(lastMatchedIndex, lastMatchedIndex + 50);
+            const match = slice.find(sFrame => hammingDistance(sFrame.hash, vFrame.hash) <= MAX_HAMMING);
+
+            if (match) {
                 matchCount++;
+                lastMatchedIndex = serverHashes.indexOf(match) + 1;
+                console.log(`✅ MATCH frame ${i} hash=${vFrame.hash}`);
             } else {
                 console.log(`❌ NO MATCH frame ${i} hash=${vFrame.hash}`);
             }
         });
 
-        const ratio = matchCount / videoHashes.length;
-        const percent = (ratio * 100).toFixed(2);
-
-        if (ratio >= 0.6) {
-            resultDiv.textContent = `Vidéo VALIDE\n${matchCount}/${videoHashes.length} frames (${percent} %)`;
-        } else {
-            resultDiv.textContent = `Vidéo NON valide\n${matchCount}/${videoHashes.length} frames (${percent} %)`;
-        }
+        const ratio = (matchCount / videoHashes.length) * 100;
+        if (ratio >= 60) resultDiv.textContent = `✅ Vidéo VALIDE (${matchCount}/${videoHashes.length} frames, ${ratio.toFixed(2)}%)`;
+        else resultDiv.textContent = `❌ Vidéo NON valide (${matchCount}/${videoHashes.length} frames, ${ratio.toFixed(2)}%)`;
     }
 
-    // Bouton vérifier
     verifyBtn.addEventListener("click", async () => {
         const file = fileInput.files[0];
-        if (!file) {
-            resultDiv.textContent = "Veuillez sélectionner une vidéo.";
-            return;
-        }
-        console.log("Vidéo sélectionnée :", file.name);
+        if (!file) { resultDiv.textContent = "Veuillez sélectionner une vidéo."; return; }
         await verifyVideo(file);
     });
 });
