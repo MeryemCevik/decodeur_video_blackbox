@@ -8,13 +8,13 @@ document.addEventListener("DOMContentLoaded", () => {
     const resultDiv = document.getElementById("result");
     const videoContainer = document.getElementById("videoContainer");
 
-    const TIME_THRESHOLD = 500; // ms tolérance timestamp
+    const TIME_THRESHOLD = 1000; // ms tolérance pour created_at
 
     // Récup hashes serveur
     async function getServerHashes() {
         const { data, error } = await supabase
             .from("frame_hashes")
-            .select("hash,timestamp");
+            .select("hash, created_at");
 
         if (error) {
             console.error("Erreur récupération hashes:", error);
@@ -34,7 +34,7 @@ document.addEventListener("DOMContentLoaded", () => {
         return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
     }
 
-    // Extraction des frames + hash + timestamp
+    // Extraction des frames + hash + created_at approximatif
     async function extractVideoHashes(videoBlob) {
         return new Promise(resolve => {
             const video = document.createElement("video");
@@ -65,8 +65,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
                     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                     const hash = await hashFrame(canvas);
-                    const timestamp = Date.now();
-                    hashes.push({ hash, timestamp });
+                    const created_at = new Date().toISOString();
+                    hashes.push({ hash, created_at });
                 }, INTERVAL);
             });
         });
@@ -81,9 +81,9 @@ document.addEventListener("DOMContentLoaded", () => {
         let matchCount = 0;
 
         videoHashes.forEach((vFrame, i) => {
-            const matched = serverData.find(sFrame =>
+            const matched = serverData.find(sFrame => 
                 sFrame.hash === vFrame.hash &&
-                Math.abs(vFrame.timestamp - sFrame.timestamp) <= TIME_THRESHOLD
+                Math.abs(new Date(sFrame.created_at) - new Date(vFrame.created_at)) <= TIME_THRESHOLD
             );
             if (matched) {
                 console.log(`✅ MATCH frame ${i} hash=${vFrame.hash}`);
