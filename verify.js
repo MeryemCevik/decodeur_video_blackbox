@@ -1,91 +1,127 @@
 import { supabase } from "./supabaseClient.js";
-import pHash from 'imghash';
-import hamming from 'hamming-distance'; // npm install hamming-distance
 
+// DOM
 const uploadedVideo = document.getElementById("uploadedVideo");
 const verifyBtn = document.getElementById("verifyBtn");
 const resultDiv = document.getElementById("result");
 const videoContainer = document.getElementById("videoContainer");
 
-async function hashWebMFrames(videoBlob) {
-    const url = URL.createObjectURL(videoBlob);
-    const video = document.createElement("video");
-    video.src = url;
-    video.muted = true;
-    video.playsInline = true;
-
-    await new Promise(resolve => video.onloadedmetadata = resolve);
-
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d");
-
-    const fps = 2; // 2 fps
-    const step = 1 / fps;
-    const hashes = [];
-
-    for (let t = 0; t < video.duration; t += step) {
-        video.currentTime = t;
-        await new Promise(resolve => video.onseeked = resolve);
-
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const blob = await new Promise(r => canvas.toBlob(r, "image/png"));
-        const hash = await pHash.hash(blob, 16); // hash perceptuel
-        hashes.push(hash);
-        console.log(`[DECODEUR] Frame ${t.toFixed(2)}s → Hash calculé : ${hash}`);
-    }
-
-    URL.revokeObjectURL(url);
-    return hashes;
+// Log helper
+function log(msg) {
+    console.log(msg);
+    resultDiv.innerHTML += msg + "<br>";
 }
 
-// Récupérer les hashes stockés
-async function getStoredHashes() {
-    const { data } = await supabase
-        .from("frame_hashes")
-        .select("hash");
+/* =========================
+   HASH D’UNE FRAME (IDENTIQUE À L’ENCODEUR)
+   ========================= */
+async function hashFrame(video, time) {
+    return new Promise(resolve => {
+        const SIZE = 128;
+        const canvas = document.createElement("canvas");
+        canvas.width = SIZE;
+        canvas.height = SIZE;
 
-    return data.map(d => d.hash);
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+        video.currentTime = time;
+        video.onseeked = async () => {
+            ctx.drawImage(video, 0, 0, SIZE, SIZE);
+
+            // grayscale (IMPORTANT)
+            const img = ctx.getImageData(0, 0, SIZE, SIZE);
+            for (let i = 0; i < img.data.length; i += 4) {
+                const g =
+                    img.data[i] * 0.299 +
+                    img.data[i + 1] * 0.587 +
+                    img.data[i + 2] * 0.114;
+                img.data[i] = img.data[i + 1] = img.data[i + 2] = g;
+            }
+            ctx.putImageData(img, 0, 0);
+
+            const blob = await new Promise(r => canvas.toBlob(r, "image/png"));
+            const buffer = await blob.arrayBuffer();
+
+            const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+            const hashHex = [...new Uint8Array(hashBuffer)]
+                .map(b => b.toString(16).padStart(2, "0"))
+                .join("");
+
+            resolve(hashHex);
+        };
+    });
 }
 
-// Vérification avec tolérance
+/* =========================
+   VÉRIFICATION VIDÉO
+   ========================= */
 async function verifyVideo(file) {
-    resultDiv.textContent = "Vérification en cours…";
+    resultDiv.innerHTML = "";
     videoContainer.innerHTML = "";
 
-    const videoElement = document.createElement("video");
-    videoElement.src = URL.createObjectURL(file);
-    videoElement.muted = true;
-    videoContainer.appendChild(videoElement);
-    await new Promise(resolve => videoElement.onloadedmetadata = resolve);
+    const video = document.createElement("video");
+    video.src = URL.createObjectURL(file);
+    video.muted = true;
+    video.playsInline = true;
+    videoContainer.appendChild(video);
 
-    const videoHashes = await hashWebMFrames(file);
-    const storedHashes = await getStoredHashes();
+    await video.play();
+    video.pause();
 
-    let total = videoHashes.length;
+    log(`Durée vidéo : ${video.duration.toFixed(2)} s`);
+
+    // Récupération des hashes assureur
+    const { data: storedHashes, error } = await supabase
+        .from("frame_hashes")
+        .select("hash")
+        .order("created_at");
+
+    if (error || !storedHashes.length) {
+        log("Aucun hash stocké côté assureur");
+        return;
+    }
+
+    log(`Hashes stockés : ${storedHashes.length}`);
+
     let matched = 0;
-    const tolerance = 5; // distance Hamming tolérée
+    let total = 0;
+    let index = 0;
 
-    videoHashes.forEach((hash, i) => {
-        const matchIndex = storedHashes.findIndex(h => hamming(Buffer.from(h, 'hex'), Buffer.from(hash, 'hex')) <= tolerance);
-        if (matchIndex >= 0) {
+    for (let t = 0; t < video.duration; t += 0.5) {
+        const computedHash = await hashFrame(video, t);
+        const storedHash = storedHashes[index]?.hash;
+
+        log(`Frame ${index} @ ${t.toFixed(2)}s`);
+        log(`→ calculé : ${computedHash}`);
+        log(`→ stocké  : ${storedHash}`);
+
+        if (computedHash === storedHash) {
+            log("✔ MATCH<br>");
             matched++;
-            console.log(`✔ Frame ${i} → Match !`);
         } else {
-            console.warn(`✘ Frame ${i} → Mismatch`);
+            log("✘ MISMATCH<br>");
         }
-    });
+
+        total++;
+        index++;
+    }
 
     const percent = Math.round((matched / total) * 100);
-    console.log(`[DECODEUR] Résultat final : ${percent}% de correspondance`);
+    log(`<strong>Résultat final : ${matched} / ${total} (${percent}%)</strong>`);
 
-    resultDiv.textContent =
+    resultDiv.innerHTML +=
         percent >= 70
-            ? `Intégrité OK (${percent}%)`
-            : `Vidéo altérée (${percent}%)`;
+            ? "<br><strong>Intégrité OK</strong>"
+            : "<br><strong>Vidéo altérée</strong>";
 }
 
+/* =========================
+   EVENT
+   ========================= */
 verifyBtn.addEventListener("click", () => {
-    if (uploadedVideo.files.length) verifyVideo(uploadedVideo.files[0]);
+    if (!uploadedVideo.files.length) {
+        alert("Veuillez sélectionner une vidéo");
+        return;
+    }
+    verifyVideo(uploadedVideo.files[0]);
 });
