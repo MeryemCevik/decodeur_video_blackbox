@@ -8,17 +8,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const DHASH_WIDTH = 9;
     const DHASH_HEIGHT = 8;
-    const MAX_HAMMING = 15; // tolérance 15 bits
-    const MAX_LOOKAHEAD = 50; // recherche seulement dans les 50 frames suivantes
+    const MAX_HAMMING = 15;
 
-    // Distance de Hamming entre deux D-Hash
     function hammingDistance(hash1, hash2) {
         let dist = 0;
         for (let i = 0; i < hash1.length; i++) if (hash1[i] !== hash2[i]) dist++;
         return dist;
     }
 
-    // Calcul D-Hash d'une canvas
     async function computeDHash(canvas) {
         const ctx = canvas.getContext("2d");
         const imgData = ctx.getImageData(0, 0, DHASH_WIDTH, DHASH_HEIGHT);
@@ -35,7 +32,6 @@ document.addEventListener("DOMContentLoaded", () => {
         return hash;
     }
 
-    // Extraction D-Hash par frame
     async function extractVideoHashes(videoBlob) {
         return new Promise(resolve => {
             const video = document.createElement("video");
@@ -49,7 +45,7 @@ document.addEventListener("DOMContentLoaded", () => {
             canvas.height = DHASH_HEIGHT;
 
             const hashes = [];
-            const INTERVAL = 1000;
+            const INTERVAL = 500;
 
             video.addEventListener("loadedmetadata", () => {
                 video.play();
@@ -64,45 +60,41 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    // Récupération hashes serveur triés par timestamp
     async function getServerHashes() {
-        const { data, error } = await supabase
-            .from("frame_hashes")
-            .select("hash, created_at")
-            .order("created_at", { ascending: true });
+        const { data, error } = await supabase.from("frame_hashes").select("hash, created_at").order("created_at", { ascending: true });
         if (error) { console.error(error); return []; }
         return data;
     }
 
-    // Vérification vidéo
     async function verifyVideo(videoBlob) {
         resultDiv.textContent = "🔍 Analyse en cours...";
         const serverHashes = await getServerHashes();
         const videoHashes = await extractVideoHashes(videoBlob);
 
         let matchCount = 0;
-        let lastMatchedIndex = 0;
+        let lastIndex = 0;
 
-        videoHashes.forEach((vFrame, i) => {
-            // Recherche seulement dans les 50 hashes suivants pour respecter chronologie
-            const slice = serverHashes.slice(lastMatchedIndex, lastMatchedIndex + MAX_LOOKAHEAD);
-            const match = slice.find(sFrame => hammingDistance(sFrame.hash, vFrame.hash) <= MAX_HAMMING);
+        for (let i = 0; i < videoHashes.length; i++) {
+            const vFrame = videoHashes[i];
+            let matched = false;
 
-            if (match) {
-                matchCount++;
-                lastMatchedIndex = serverHashes.indexOf(match) + 1;
-                console.log(`✅ MATCH frame ${i} hash=${vFrame.hash}`);
-            } else {
-                console.log(`❌ NO MATCH frame ${i} hash=${vFrame.hash}`);
+            for (let j = lastIndex; j < serverHashes.length; j++) {
+                if (hammingDistance(vFrame.hash, serverHashes[j].hash) <= MAX_HAMMING) {
+                    matchCount++;
+                    lastIndex = j + 1; // ne pas chercher en arrière
+                    matched = true;
+                    console.log(`✅ MATCH frame ${i} hash=${vFrame.hash}`);
+                    break;
+                }
             }
-        });
+
+            if (!matched) console.log(`❌ NO MATCH frame ${i} hash=${vFrame.hash}`);
+        }
 
         const ratio = (matchCount / videoHashes.length) * 100;
-        if (ratio >= 60) {
-            resultDiv.textContent = `✅ Vidéo VALIDE (${matchCount}/${videoHashes.length} frames, ${ratio.toFixed(2)}%)`;
-        } else {
-            resultDiv.textContent = `❌ Vidéo NON valide (${matchCount}/${videoHashes.length} frames, ${ratio.toFixed(2)}%)`;
-        }
+        resultDiv.textContent = ratio >= 60
+            ? `✅ Vidéo VALIDE (${matchCount}/${videoHashes.length} frames, ${ratio.toFixed(2)}%)`
+            : `❌ Vidéo NON valide (${matchCount}/${videoHashes.length} frames, ${ratio.toFixed(2)}%)`;
     }
 
     verifyBtn.addEventListener("click", async () => {
