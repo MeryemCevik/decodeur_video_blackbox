@@ -61,7 +61,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     async function getServerHashes() {
-        const { data, error } = await supabase.from("frame_hashes").select("hash, created_at").order("created_at", { ascending: true });
+        const { data, error } = await supabase
+            .from("frame_hashes")
+            .select("hash, created_at")
+            .order("created_at", { ascending: true });
         if (error) { console.error(error); return []; }
         return data;
     }
@@ -78,10 +81,11 @@ document.addEventListener("DOMContentLoaded", () => {
             const vFrame = videoHashes[i];
             let matched = false;
 
+            // Compare seulement aux frames suivantes
             for (let j = lastIndex; j < serverHashes.length; j++) {
                 if (hammingDistance(vFrame.hash, serverHashes[j].hash) <= MAX_HAMMING) {
                     matchCount++;
-                    lastIndex = j + 1; // ne pas chercher en arrière
+                    lastIndex = j + 1; // ne pas regarder en arrière
                     matched = true;
                     console.log(`✅ MATCH frame ${i} hash=${vFrame.hash}`);
                     break;
@@ -91,10 +95,8 @@ document.addEventListener("DOMContentLoaded", () => {
             if (!matched) console.log(`❌ NO MATCH frame ${i} hash=${vFrame.hash}`);
         }
 
-        const ratio = (matchCount / videoHashes.length) * 100;
-        resultDiv.textContent = ratio >= 60
-            ? `✅ Vidéo VALIDE (${matchCount}/${videoHashes.length} frames, ${ratio.toFixed(2)}%)`
-            : `❌ Vidéo NON valide (${matchCount}/${videoHashes.length} frames, ${ratio.toFixed(2)}%)`;
+        // Affiche juste le nombre de frames matchées
+        resultDiv.textContent = `Frames matchées : ${matchCount} / ${videoHashes.length}`;
     }
 
     verifyBtn.addEventListener("click", async () => {
