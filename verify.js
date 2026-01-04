@@ -10,10 +10,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const videoContainer = document.getElementById("videoContainer");
 
     /* =========================
-       RÉCUPÉRATION DES HASHES SERVEUR
+       RÉCUPÉRATION DES HASHES
        ========================= */
     async function getServerHashes() {
-        console.log("Récupération des hashes depuis Supabase...");
+        console.log("Récupération des hashes serveur...");
 
         const { data, error } = await supabase
             .from("frame_hashes")
@@ -24,12 +24,12 @@ document.addEventListener("DOMContentLoaded", () => {
             return [];
         }
 
-        console.log("Nombre de hashes serveur :", data.length);
+        console.log("Hashes récupérés :", data.length);
         return data.map(h => h.hash);
     }
 
     /* =========================
-       HASH D’UNE FRAME (IDENTIQUE ENCODEUR)
+       HASH D’UNE FRAME
        ========================= */
     async function hashFrame(canvas) {
         const blob = await new Promise(resolve =>
@@ -46,44 +46,44 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     /* =========================
-       EXTRACTION DES FRAMES VIDÉO
+       EXTRACTION DES FRAMES
        ========================= */
     async function extractVideoHashes(videoBlob) {
-        console.log("Extraction des frames vidéo...");
+        console.log("Extraction des frames vidéo");
 
         return new Promise(resolve => {
 
             const video = document.createElement("video");
             video.src = URL.createObjectURL(videoBlob);
             video.muted = true;
+            video.controls = true;
 
             videoContainer.innerHTML = "";
-            video.controls = true;
             videoContainer.appendChild(video);
 
             const canvas = document.createElement("canvas");
             const ctx = canvas.getContext("2d");
 
             const hashes = [];
-            const INTERVAL = 500; // même valeur que l’encodeur
+            const INTERVAL = 500;
 
             video.addEventListener("loadedmetadata", () => {
                 canvas.width = video.videoWidth;
                 canvas.height = video.videoHeight;
 
-                console.log("Durée vidéo :", video.duration, "secondes");
+                console.log("Durée vidéo :", video.duration, "s");
 
                 video.play();
 
                 const timer = setInterval(async () => {
                     if (video.ended) {
                         clearInterval(timer);
-                        console.log("Fin extraction frames :", hashes.length);
+                        console.log("Fin extraction :", hashes.length);
                         resolve(hashes);
                         return;
                     }
 
-                    console.log("Capture frame à", video.currentTime.toFixed(2), "s");
+                    console.log("Frame à", video.currentTime.toFixed(2), "s");
                     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                     const hash = await hashFrame(canvas);
                     hashes.push(hash);
@@ -94,43 +94,41 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     /* =========================
-       VÉRIFICATION INTÉGRITÉ (SEUIL 60 %)
+       VÉRIFICATION (SEUIL 60 %)
        ========================= */
     async function verifyVideo(videoBlob) {
-        resultDiv.textContent = "Analyse de la vidéo en cours...";
+        resultDiv.textContent = "Analyse en cours...";
 
         const serverHashes = await getServerHashes();
         const videoHashes = await extractVideoHashes(videoBlob);
 
         let matchCount = 0;
 
-        videoHashes.forEach((hash, index) => {
-            if (serverHashes.includes(hash)) {
-                console.log("MATCH frame", index);
+        videoHashes.forEach((h, i) => {
+            if (serverHashes.includes(h)) {
+                console.log("MATCH frame", i);
                 matchCount++;
             } else {
-                console.log("NO MATCH frame", index);
+                console.log("NO MATCH frame", i);
             }
         });
 
         const ratio = matchCount / videoHashes.length;
         const percent = (ratio * 100).toFixed(2);
 
-        console.log("Résultat :", matchCount, "/", videoHashes.length, percent + "%");
-
         if (ratio >= 0.6) {
             resultDiv.textContent =
-                `Vidéo considérée comme VALIDE
-                (${matchCount}/${videoHashes.length} frames – ${percent} %)`;
+                `Vidéo VALIDE
+                 ${matchCount}/${videoHashes.length} frames (${percent} %)`;
         } else {
             resultDiv.textContent =
                 `Vidéo NON valide
-                (${matchCount}/${videoHashes.length} frames – ${percent} %)`;
+                 ${matchCount}/${videoHashes.length} frames (${percent} %)`;
         }
     }
 
     /* =========================
-       BOUTON DE VÉRIFICATION
+       BOUTON VÉRIFIER
        ========================= */
     verifyBtn.addEventListener("click", async () => {
         const file = fileInput.files[0];
