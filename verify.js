@@ -1,96 +1,78 @@
-// verify.js
+// script.js pour le décodeur
 import { supabase } from "./supabaseClient.js";
 
-const uploadedVideoInput = document.getElementById("uploadedVideo");
-const verifyBtn = document.getElementById("verifyBtn");
-const resultDiv = document.getElementById("result");
-const videoContainer = document.getElementById("videoContainer");
+const video = document.getElementById("preview");
+const recordBtn = document.getElementById("recordBtn");
+const uploadBtn = document.getElementById("uploadBtn");
+const status = document.getElementById("status");
 
-verifyBtn.addEventListener("click", async () => {
-    const file = uploadedVideoInput.files[0];
-    if (!file) {
-        resultDiv.textContent = "Veuillez sélectionner une vidéo.";
-        return;
+let stream;
+let frames = [];
+let hashList = [];
+
+// initialisation caméra
+async function initCamera() {
+    try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        video.srcObject = stream;
+    } catch (err) {
+        console.error("Erreur d'accès à la caméra :", err);
+        status.textContent = "Erreur d'accès à la caméra.";
     }
+}
 
-    // Affiche la vidéo
-    videoContainer.innerHTML = "";
-    const videoEl = document.createElement("video");
-    videoEl.src = URL.createObjectURL(file);
-    videoEl.controls = true;
-    videoContainer.appendChild(videoEl);
+// capture frame
+async function captureFrame() {
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
 
-    resultDiv.textContent = "Calcul des hashes et vérification…";
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
 
-    // Extraction des frames et calcul SHA-256
-    const hashes = await hashVideoBlob(file);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const frameData = canvas.toDataURL("image/jpeg");
+    frames.push(frameData);
 
-    // Récupération des hashes stockés dans Supabase
-    let { data: storedHashes, error } = await supabase
+    const hashBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(frameData));
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    hashList.push(hashHex);
+    return hashHex;
+}
+
+// comparaison des hashs avec Supabase
+async function verifyHashes() {
+    status.textContent = "Vérification de l'intégrité...";
+    const { data: storedHashes, error } = await supabase
         .from("frame_hashes")
-        .select("*");
+        .select("hash");
 
     if (error) {
-        console.error("Erreur récupération hashes :", error);
-        resultDiv.textContent = "Erreur lors de la récupération des hashes.";
+        console.error("Erreur récupération hashs :", error);
         return;
     }
 
-    // Comparaison frame par frame
-    const mismatches = [];
-    for (let i = 0; i < hashes.length; i++) {
-        const stored = storedHashes.find(h => h.frame_index === i);
-        if (!stored || stored.hash !== hashes[i].hash) {
-            mismatches.push(i);
-        }
+    let matches = 0;
+    for (let hash of hashList) {
+        if (storedHashes.some(h => h.hash === hash)) matches++;
     }
 
-    if (mismatches.length === 0) {
-        resultDiv.textContent = "✅ Intégrité vérifiée : toutes les frames correspondent !";
-    } else {
-        resultDiv.innerHTML = `⚠️ Mismatch sur ${mismatches.length} frame(s) : ${mismatches.join(", ")}`;
-    }
+    status.textContent = `Intégrité vérifiée : ${matches} frames correspondent sur ${hashList.length}.`;
+}
+
+// bouton pour démarrer l'enregistrement et la vérification
+recordBtn.addEventListener("click", () => {
+    frames = [];
+    hashList = [];
+    
+    const captureInterval = setInterval(captureFrame, 200);
+
+    // stop après 3 secondes (ou selon besoin)
+    setTimeout(async () => {
+        clearInterval(captureInterval);
+        await verifyHashes();
+    }, 3000);
 });
 
-// Fonction pour extraire frames et calculer SHA-256
-async function hashVideoBlob(videoBlob) {
-    return new Promise((resolve) => {
-        const offscreenVideo = document.createElement("video");
-        offscreenVideo.src = URL.createObjectURL(videoBlob);
-        offscreenVideo.muted = true;
-        offscreenVideo.play();
-
-        const canvas = document.createElement("canvas");
-        const ctx = canvas.getContext("2d");
-        let hashes = [];
-        let frameIndex = 0;
-
-        offscreenVideo.addEventListener("loadedmetadata", () => {
-            canvas.width = offscreenVideo.videoWidth;
-            canvas.height = offscreenVideo.videoHeight;
-
-            const fps = 2; // extraction toutes les 0.5s pour matcher l'encodeur
-            offscreenVideo.currentTime = 0;
-
-            offscreenVideo.addEventListener("seeked", async function processFrame() {
-                ctx.drawImage(offscreenVideo, 0, 0, canvas.width, canvas.height);
-                const blob = await new Promise(r => canvas.toBlob(r, "image/png"));
-                const buffer = await blob.arrayBuffer();
-                const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
-                const hashArray = Array.from(new Uint8Array(hashBuffer));
-                const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-                hashes.push({ frame_index: frameIndex, hash: hashHex });
-                frameIndex++;
-
-                if (offscreenVideo.currentTime + 1 / fps <= offscreenVideo.duration) {
-                    offscreenVideo.currentTime += 1 / fps;
-                } else {
-                    resolve(hashes);
-                }
-            });
-
-            // Déclenche la première frame
-            offscreenVideo.currentTime = 0;
-        });
-    });
-}
+// initialisation caméra
+initCamera();
