@@ -1,13 +1,64 @@
-/* Style général */
+* {
+    box-sizing: border-box;
+    font-family: Arial, Helvetica, sans-serif;
+}
+
 body {
-    font-family: Arial, sans-serif;
-    text-align: center;
-    padding: 20px;
-  }
-  
-  /* Style pour la zone vidéo reconstituée */
-  #videoContainer canvas {
+    background: #f4f6f8;
+    color: #222;
+    padding: 40px;
+}
+
+/* Titre */
+h1 {
+    margin-bottom: 25px;
+    font-size: 1.8rem;
+}
+
+/* Input et boutons */
+input[type="file"] {
+    margin-bottom: 15px;
+    padding: 6px;
+    font-size: 1rem;
+}
+
+button {
+    padding: 10px 18px;
+    margin-left: 10px;
+    font-size: 1rem;
+    border-radius: 4px;
+    border: 1px solid #bbb;
+    background: #ffffff;
+    cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+    background: #eaeaea;
+}
+
+button:disabled {
+    background: #dddddd;
+    cursor: not-allowed;
+}
+
+/* Résultat et conteneur vidéo */
+#result {
     margin-top: 20px;
-    border: 1px solid #333; /* Contour pour mieux visualiser le canvas */
-  }
-  
+    padding: 10px;
+    background: #ffffff;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.95rem;
+    max-width: 640px;
+}
+
+#videoContainer {
+    margin-top: 20px;
+}
+
+#videoContainer video {
+    width: 640px;
+    max-width: 100%;
+    border-radius: 6px;
+    border: 1px solid #ccc;
+}
