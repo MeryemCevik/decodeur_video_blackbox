@@ -1,81 +1,125 @@
 import { supabase } from "./supabaseClient.js";
 
-const video = document.getElementById("preview");
-const recordBtn = document.getElementById("recordBtn");
-const uploadBtn = document.getElementById("uploadBtn");
-const statusDiv = document.getElementById("status");
+document.addEventListener("DOMContentLoaded", () => {
 
-let mediaRecorder;
-let recordedChunks = [];
-let driverVideoBlob;
+    const video = document.getElementById("preview");
+    const uploadBtn = document.getElementById("uploadBtn");
+    const statusDiv = document.getElementById("status");
 
-// Récupérer les hashes du serveur
-async function getStoredHashes() {
-    const { data, error } = await supabase.from("frame_hashes").select("*");
-    if (error) {
-        console.error("Erreur récupération hashes : ", error.message);
-        return [];
+    /* =========================
+       RÉCUPÉRATION DES HASHES
+       ========================= */
+    async function getServerHashes() {
+        const { data, error } = await supabase
+            .from("frame_hashes")
+            .select("hash");
+
+        if (error) {
+            console.error("Erreur récupération hashes :", error);
+            return [];
+        }
+        return data.map(h => h.hash);
     }
-    return data.map(d => d.hash);
-}
 
-// Découpage vidéo en frames
-async function extractFrames(blob) {
-    const videoEl = document.createElement("video");
-    videoEl.src = URL.createObjectURL(blob);
-    await videoEl.play();
+    /* =========================
+       HASH FRAME (IDENTIQUE ENCODEUR)
+       ========================= */
+    async function hashFrame(canvas) {
+        const blob = await new Promise(resolve =>
+            canvas.toBlob(resolve, "image/png")
+        );
+        const buffer = await blob.arrayBuffer();
 
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d");
-    canvas.width = videoEl.videoWidth;
-    canvas.height = videoEl.videoHeight;
+        const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
 
-    const frames = [];
-    const INTERVAL = 200; // ms
+        return hashArray
+            .map(b => b.toString(16).padStart(2, "0"))
+            .join("");
+    }
 
-    return new Promise(resolve => {
-        const intervalId = setInterval(() => {
-            if (videoEl.ended) {
-                clearInterval(intervalId);
-                resolve(frames);
-                return;
+    /* =========================
+       EXTRACTION DES FRAMES
+       ========================= */
+    async function extractVideoHashes(videoBlob) {
+        return new Promise(resolve => {
+
+            const tempVideo = document.createElement("video");
+            tempVideo.src = URL.createObjectURL(videoBlob);
+            tempVideo.muted = true;
+
+            const canvas = document.createElement("canvas");
+            const ctx = canvas.getContext("2d");
+
+            const hashes = [];
+            const INTERVAL = 500; // EXACTEMENT comme l’encodeur
+
+            tempVideo.addEventListener("loadedmetadata", () => {
+                canvas.width = tempVideo.videoWidth;
+                canvas.height = tempVideo.videoHeight;
+
+                tempVideo.play();
+
+                const interval = setInterval(async () => {
+                    if (tempVideo.ended) {
+                        clearInterval(interval);
+                        resolve(hashes);
+                        return;
+                    }
+
+                    ctx.drawImage(tempVideo, 0, 0, canvas.width, canvas.height);
+                    const hash = await hashFrame(canvas);
+                    hashes.push(hash);
+
+                }, INTERVAL);
+            });
+        });
+    }
+
+    /* =========================
+       VÉRIFICATION INTÉGRITÉ
+       ========================= */
+    async function verifyVideoIntegrity(videoBlob) {
+        statusDiv.textContent = "Analyse de la vidéo en cours...";
+
+        const serverHashes = await getServerHashes();
+        const videoHashes = await extractVideoHashes(videoBlob);
+
+        let matchCount = 0;
+
+        videoHashes.forEach(h => {
+            if (serverHashes.includes(h)) {
+                matchCount++;
             }
-            ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
-            canvas.toBlob(async blob => {
-                const hash = await generateHash(blob);
-                frames.push(hash);
-            }, "image/png");
-        }, INTERVAL);
+        });
+
+        const ratio = ((matchCount / videoHashes.length) * 100).toFixed(2);
+
+        statusDiv.textContent =
+            `Résultat intégrité :
+             ${matchCount}/${videoHashes.length} frames valides
+             (${ratio} %)`;
+    }
+
+    /* =========================
+       CHARGEMENT VIDÉO CONDUCTEUR
+       ========================= */
+    uploadBtn.addEventListener("click", () => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "video/webm,video/*";
+
+        input.onchange = async e => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            video.src = URL.createObjectURL(file);
+            video.controls = true;
+
+            await verifyVideoIntegrity(file);
+        };
+
+        input.click();
     });
-}
 
-// Fonction de hash identique à l'encodeur
-async function generateHash(blob) {
-    const arrayBuffer = await blob.arrayBuffer();
-    const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
-}
-
-// Comparer les hashes pour vérifier intégrité
-async function verifyVideo(blob) {
-    const storedHashes = await getStoredHashes();
-    const videoHashes = await extractFrames(blob);
-
-    const matches = videoHashes.filter(h => storedHashes.includes(h));
-    statusDiv.textContent = `Intégrité vérifiée : ${matches.length}/${videoHashes.length} frames correspondent`;
-}
-
-// Charger la vidéo du conducteur
-uploadBtn.addEventListener("click", async () => {
-    const fileInput = document.createElement("input");
-    fileInput.type = "file";
-    fileInput.accept = "video/*";
-
-    fileInput.onchange = async e => {
-        driverVideoBlob = e.target.files[0];
-        await verifyVideo(driverVideoBlob);
-    };
-
-    fileInput.click();
 });
